@@ -114,6 +114,30 @@ client has to mark the source `[trusted=yes]` (or run `apt-get update
 The choice is recorded in `createapt-go.json`, so later updates to that
 repository do not need the flag again — they still print the warning.
 
+### Signing unattended (CI)
+
+Only `--gpg-key-id` can reach a passphrase prompt: it hands the signing to the
+`gpg` binary, and `gpg` hands the passphrase question to `gpg-agent`, which
+launches `pinentry` on whatever terminal or display it finds. `--batch` does not
+stop that. On a CI runner that allocates a TTY, a missing passphrase therefore
+hangs the job on a prompt nobody can answer, until the job times out.
+
+`--gpg-no-prompt` (or `CREATEAPT_GPG_NO_PROMPT=1`) forbids the prompt: `gpg` runs
+with `--no-tty` and `--pinentry-mode error`, and without `GPG_TTY`, `DISPLAY` or
+`WAYLAND_DISPLAY`, so a key it cannot unlock fails the publish immediately
+instead of waiting.
+
+```sh
+# Unattended publish: the passphrase comes from the environment, and a prompt
+# is an error rather than a hang.
+export CREATEAPT_GPG_NO_PROMPT=1
+export CREATEAPT_GPG_PASSPHRASE="$SIGNING_KEY_PASSPHRASE"
+createapt-go add s3://apt.example.com dist/*.deb --gpg-key-id releases@example.com
+```
+
+`--gpg-key FILE` never prompts at all: the key file is read and unlocked
+in-process, so an encrypted key with no `--gpg-passphrase` is a plain error.
+
 ## Backends
 
 The repository location's URL scheme selects the backend:
@@ -223,6 +247,9 @@ publish, so there is no flag to opt into blob cleanup.
 --gpg-key FILE            private key file (signing)
 --gpg-key-id ID           key id/uid from the local keyring (signing)
 --gpg-passphrase / $CREATEAPT_GPG_PASSPHRASE
+--gpg-no-prompt / $CREATEAPT_GPG_NO_PROMPT
+                          never let gpg ask for a key passphrase; fail instead of
+                          prompting (use in CI, where a prompt hangs the job)
 ```
 
 ## Examples

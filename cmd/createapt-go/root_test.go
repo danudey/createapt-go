@@ -365,6 +365,22 @@ func TestHostArchUsesDebianNames(t *testing.T) {
 	}
 }
 
+func TestEnvBool(t *testing.T) {
+	const name = "CREATEAPT_TEST_BOOL"
+	for _, v := range []string{"1", "true", "TRUE", "yes", " on "} {
+		t.Setenv(name, v)
+		if !envBool(name) {
+			t.Errorf("envBool(%q) = false; want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "maybe"} {
+		t.Setenv(name, v)
+		if envBool(name) {
+			t.Errorf("envBool(%q) = true; want false", v)
+		}
+	}
+}
+
 func TestSplitList(t *testing.T) {
 	if got := splitList(" a , b ,, c "); strings.Join(got, "|") != "a|b|c" {
 		t.Errorf("splitList trimmed or split wrongly: %v", got)

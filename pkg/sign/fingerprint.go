@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -50,7 +49,7 @@ func fingerprintFromFile(path string) (string, error) {
 // keyring. gpg's colon-delimited output is parsed rather than its human
 // output, which is not stable across versions.
 func fingerprintFromKeyring(keyID string) (string, error) {
-	cmd := exec.Command(GPGBinary(), "--batch", "--with-colons", "--fingerprint", keyID)
+	cmd := gpgCommand("--with-colons", "--fingerprint", keyID)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
@@ -80,7 +79,7 @@ func fingerprintFromKeyring(keyID string) (string, error) {
 // keyring. It is what lets a repository publish the key its clients need to
 // install alongside it.
 func ExportPublicKey(keyID string) ([]byte, error) {
-	cmd := exec.Command(GPGBinary(), "--batch", "--armor", "--export", keyID)
+	cmd := gpgCommand("--armor", "--export", keyID)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf

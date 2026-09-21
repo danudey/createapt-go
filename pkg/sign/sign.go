@@ -9,7 +9,8 @@
 //
 // Two key sources are supported: a private key file (handled natively with
 // OpenPGP) and a key identifier from the user's GnuPG keyring (delegated to the
-// gpg binary).
+// gpg binary). Only the second can reach a passphrase prompt; see
+// NoPassphrasePrompt.
 package sign
 
 import (
@@ -111,17 +112,22 @@ func (s *ReleaseSigner) SignClearsigned(data []byte) ([]byte, error) {
 
 // gpg shells out to the gpg binary to sign data with the configured key.
 func (s *ReleaseSigner) gpg(data []byte, mode ...string) ([]byte, error) {
-	args := append([]string{"--batch", "--yes", "--output", "-"}, mode...)
+	args := append([]string{"--yes", "--output", "-"}, mode...)
 	if s.keyID != "" {
 		args = append(args, "--local-user", s.keyID)
 	}
-	if s.passphrase != "" {
+	switch {
+	case s.passphrase != "":
 		// --pinentry-mode loopback is what lets a passphrase be supplied
 		// without a terminal, which is the case in any automated publish.
 		args = append(args, "--pinentry-mode", "loopback", "--passphrase-fd", "0")
+	case NoPassphrasePrompt:
+		// No passphrase to hand over and none may be asked for: "error" makes
+		// gpg-agent fail the operation instead of launching pinentry.
+		args = append(args, "--pinentry-mode", "error")
 	}
 
-	cmd := exec.Command(GPGBinary(), args...)
+	cmd := gpgCommand(args...)
 	if s.passphrase != "" {
 		cmd.Stdin = strings.NewReader(s.passphrase + "\n")
 		// The document to sign cannot also come from stdin, so it is passed by
@@ -140,7 +146,12 @@ func (s *ReleaseSigner) gpg(data []byte, mode ...string) ([]byte, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("gpg %s: %w: %s", strings.Join(mode, " "), err, errBuf.String())
+		hint := ""
+		if s.passphrase == "" && NoPassphrasePrompt {
+			hint = " (prompting is disabled: if the key is passphrase-protected," +
+				" supply it with --gpg-passphrase or $CREATEAPT_GPG_PASSPHRASE)"
+		}
+		return nil, fmt.Errorf("gpg %s: %w: %s%s", strings.Join(mode, " "), err, errBuf.String(), hint)
 	}
 	return ensureTrailingNewline(out.Bytes()), nil
 }
@@ -163,6 +174,48 @@ func writeTemp(data []byte) (string, func(), error) {
 		return "", func() {}, err
 	}
 	return name, cleanup, nil
+}
+
+// NoPassphrasePrompt stops any gpg invocation from asking a human for a key
+// passphrase, failing the operation instead.
+//
+// --batch alone is not enough. It keeps gpg itself from asking questions, but
+// the passphrase is asked for by gpg-agent, which launches pinentry on its own
+// and will happily use a terminal or an X display if it finds one. On a CI
+// runner that allocates a TTY, that turns a missing passphrase into a build
+// that hangs on a prompt nobody is there to answer, until the job times out.
+var NoPassphrasePrompt bool
+
+// gpgCommand builds a gpg invocation. Every call is --batch, and when
+// NoPassphrasePrompt is set the child is additionally denied the two things
+// pinentry needs to reach a human: a controlling terminal and a display.
+func gpgCommand(args ...string) *exec.Cmd {
+	prefix := []string{"--batch"}
+	if NoPassphrasePrompt {
+		prefix = append(prefix, "--no-tty")
+	}
+	cmd := exec.Command(GPGBinary(), append(prefix, args...)...)
+	if NoPassphrasePrompt {
+		cmd.Env = envWithout("GPG_TTY", "DISPLAY", "WAYLAND_DISPLAY")
+	}
+	return cmd
+}
+
+// envWithout returns the current environment with the named variables dropped.
+func envWithout(names ...string) []string {
+	drop := make(map[string]bool, len(names))
+	for _, n := range names {
+		drop[n] = true
+	}
+	env := os.Environ()
+	kept := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if !drop[name] {
+			kept = append(kept, kv)
+		}
+	}
+	return kept
 }
 
 // GPGBinary returns the gpg command to invoke, overridable for testing and for

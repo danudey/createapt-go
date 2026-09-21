@@ -154,6 +154,103 @@ func TestLoadKeyringRejectsNonKeys(t *testing.T) {
 	}
 }
 
+// fakeGPG installs a stand-in gpg that records how it was invoked, so the
+// non-interactive hardening can be asserted without a real gpg or a real key.
+func fakeGPG(t *testing.T) (record func() (args string, env string)) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	envFile := filepath.Join(dir, "env")
+	script := filepath.Join(dir, "fake-gpg")
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" > " + argsFile + "\n" +
+		"printf 'GPG_TTY=%s DISPLAY=%s\\n' \"${GPG_TTY-unset}\" \"${DISPLAY-unset}\" > " + envFile + "\n" +
+		"printf 'signature\\n'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CREATEAPT_GPG", script)
+	return func() (string, string) {
+		t.Helper()
+		args, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env, err := os.ReadFile(envFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(args), string(env)
+	}
+}
+
+// setNoPassphrasePrompt flips the package-wide switch for one test.
+func setNoPassphrasePrompt(t *testing.T, v bool) {
+	t.Helper()
+	prev := NoPassphrasePrompt
+	NoPassphrasePrompt = v
+	t.Cleanup(func() { NoPassphrasePrompt = prev })
+}
+
+// TestNoPassphrasePromptHardensGPG covers the CI case: a runner with a TTY
+// looks interactive to gpg-agent, so a missing passphrase would hang the job on
+// a pinentry prompt. Nothing must be left for pinentry to use.
+func TestNoPassphrasePromptHardensGPG(t *testing.T) {
+	record := fakeGPG(t)
+	t.Setenv("GPG_TTY", "/dev/tty")
+	t.Setenv("DISPLAY", ":0")
+	setNoPassphrasePrompt(t, true)
+
+	if _, err := NewKeyIDSigner("releases@example.invalid", "").SignDetached([]byte("Origin: Example\n")); err != nil {
+		t.Fatal(err)
+	}
+	args, env := record()
+
+	for _, want := range []string{"--batch", "--no-tty", "--pinentry-mode error"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("gpg was invoked without %s: %s", want, args)
+		}
+	}
+	if strings.Contains(env, "GPG_TTY=/dev/tty") || strings.Contains(env, "DISPLAY=:0") {
+		t.Errorf("gpg inherited a terminal or display pinentry could prompt on: %s", env)
+	}
+}
+
+// A supplied passphrase is already non-interactive: loopback with the
+// passphrase on stdin must be kept, not replaced by the erroring mode.
+func TestNoPassphrasePromptKeepsLoopbackWhenAPassphraseIsGiven(t *testing.T) {
+	record := fakeGPG(t)
+	setNoPassphrasePrompt(t, true)
+
+	if _, err := NewKeyIDSigner("releases@example.invalid", "hunter2").SignClearsigned([]byte("Origin: Example\n")); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := record()
+
+	if !strings.Contains(args, "--pinentry-mode loopback") || !strings.Contains(args, "--passphrase-fd 0") {
+		t.Errorf("a supplied passphrase is no longer passed through loopback: %s", args)
+	}
+	if strings.Contains(args, "--pinentry-mode error") {
+		t.Errorf("the erroring pinentry mode overrode the supplied passphrase: %s", args)
+	}
+}
+
+// Left off, prompting stays possible: an interactive user signing with an
+// agent-held key must not be denied the terminal.
+func TestPromptingIsAllowedByDefault(t *testing.T) {
+	record := fakeGPG(t)
+	setNoPassphrasePrompt(t, false)
+
+	if _, err := NewKeyIDSigner("releases@example.invalid", "").SignDetached([]byte("Origin: Example\n")); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := record()
+
+	if strings.Contains(args, "--no-tty") || strings.Contains(args, "--pinentry-mode") {
+		t.Errorf("prompting was suppressed without being asked for: %s", args)
+	}
+}
+
 // TestGPGSignerAgreesWithGPG signs through the gpg binary and verifies the
 // result natively, which is what proves the two signing paths are
 // interchangeable.
@@ -212,5 +309,15 @@ func TestGPGSignerAgreesWithGPG(t *testing.T) {
 	}
 	if fpr != gotFpr {
 		t.Errorf("Fingerprint reports %s but the signature was made by %s", fpr, gotFpr)
+	}
+
+	// Forbidding prompts must not break a key that needs no passphrase: real
+	// gpg has to accept the hardened invocation, not just the fake one.
+	setNoPassphrasePrompt(t, true)
+	if _, err := signer.SignDetached(release); err != nil {
+		t.Errorf("gpg rejected the non-interactive invocation: %v", err)
+	}
+	if _, err := Fingerprint("", "keyring@example.invalid"); err != nil {
+		t.Errorf("gpg rejected the non-interactive --fingerprint invocation: %v", err)
 	}
 }

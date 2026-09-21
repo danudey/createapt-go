@@ -73,6 +73,12 @@ type globalFlags struct {
 	gpgPass       string
 	keyrings      []string
 
+	// gpgNoPrompt forbids every interactive passphrase prompt gpg could raise.
+	// It is what an unattended run wants: a CI runner that allocates a TTY
+	// looks interactive to gpg-agent, so without this a missing passphrase
+	// hangs the job on a prompt instead of failing it.
+	gpgNoPrompt bool
+
 	// unsignedByConfig records that signing was turned off by the repository's
 	// own recorded config rather than by --no-sign-release on this command line,
 	// so the warning can name the real source of the decision.
@@ -178,6 +184,7 @@ packages are never downloaded.`,
 	pf.StringVar(&gf.gpgKey, "gpg-key", "", "path to a GPG private key file (for signing)")
 	pf.StringVar(&gf.gpgKeyID, "gpg-key-id", "", "GPG key id/uid from the local keyring (for signing)")
 	pf.StringVar(&gf.gpgPass, "gpg-passphrase", os.Getenv("CREATEAPT_GPG_PASSPHRASE"), "passphrase for the signing key (or set CREATEAPT_GPG_PASSPHRASE)")
+	pf.BoolVar(&gf.gpgNoPrompt, "gpg-no-prompt", envBool("CREATEAPT_GPG_NO_PROMPT"), "never let gpg ask for a key passphrase; fail instead of prompting (or set CREATEAPT_GPG_NO_PROMPT=1). Use this in CI, where a prompt hangs the job")
 	pf.StringArrayVar(&gf.keyrings, "keyring", nil, "public keyring file to verify a repository's Release against (repeatable)")
 
 	root.AddCommand(addCmd(), removeCmd(), rebuildCmd(), copyCmd(), createCmd(), listCmd(), verifyCmd(), checkCmd())
@@ -195,7 +202,19 @@ func preRunE(cmd *cobra.Command, args []string) error {
 	}
 	applyAWSEnv()
 	backend.InsecureIgnoreHostKey = gf.insecureIgnoreHostKey
+	sign.NoPassphrasePrompt = gf.gpgNoPrompt
 	return validateSigningFlags()
+}
+
+// envBool reads a boolean from the environment, accepting the spellings a CI
+// configuration is likely to use. An unset or unrecognised value is false.
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // applyAWSEnv translates --profile/--region into the AWS_PROFILE/AWS_REGION
