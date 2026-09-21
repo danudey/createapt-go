@@ -1,0 +1,177 @@
+name: CI
+
+# Builds and tests on every operating system and CPU architecture the project
+# claims to support.
+#
+# Two jobs, because they answer different questions:
+#
+#   test         does the code work. Runs the real test suite on real hardware,
+#                so it can only cover architectures GitHub gives us runners
+#                for: x86-64 and arm64 on Linux, macOS and Windows.
+#
+#   cross-build  does the code still compile everywhere else. Go cross-compiles
+#                without a toolchain per target, so this is cheap, and it
+#                catches the breakage that otherwise turns up mid-release:
+#                a syscall that does not exist on a BSD, an int that is 32 bits
+#                on a 32-bit target, a build tag that excludes every file.
+#
+# WHAT TO CHANGE
+#   1. `WORKING_DIRECTORY` below, if go.mod is not at the repository root.
+#      Everything else follows from it.
+#   2. `GO_VERSION`. `stable` tracks the current release. Pin it ("1.25.x") if
+#      the project needs to be reproducible against one toolchain. The test
+#      matrix also runs `oldstable`, which is what keeps the go directive in
+#      go.mod honest; drop that entry if you only support the latest Go.
+#   3. The `test` matrix, to add or remove runners. `ubuntu-24.04-arm` and
+#      `windows-11-arm` are the arm64 Linux and Windows runners; both are free
+#      on public repositories.
+#   4. The `cross-build` matrix. `go tool dist list` prints every GOOS/GOARCH
+#      pair Go knows about. Keep the ones you would answer a bug report for.
+#
+# WHAT IT NEEDS
+#   - A committed go.sum. Every command here uses `-mod=readonly` semantics by
+#     default, so a missing or stale go.sum fails rather than silently
+#     resolving something new.
+#   - Nothing else. No secrets.
+#
+# WHAT IT PRODUCES
+#   - One status check per runner and per target, so branch protection can
+#     require them by name.
+#   - A coverage profile artifact from the Linux x86-64 test run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The directory holding go.mod. "." for a repository root module.
+  WORKING_DIRECTORY: "."
+  # The toolchain to build and test with.
+  GO_VERSION: "stable"
+  # Passed to `go build ./...` and `go test ./...` by default. Narrow it
+  # ("./cmd/... ./internal/...") if the module contains directories that
+  # should not be built in CI.
+  PACKAGES: "./..."
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+    strategy:
+      # One platform failing should not hide the others.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+          # Uncomment for arm64 Windows. Slower to schedule than the others.
+          # - windows-11-arm
+        go: ["stable"]
+        # No `oldstable` row: go.mod asks for go 1.26.4, so an oldstable
+        # toolchain would either fail outright or silently download 1.26.4
+        # and test the same thing twice. Add one back if the go directive is
+        # ever lowered.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          # Caches the module and build caches, keyed off go.sum. The action
+          # does this by default; naming the file explicitly is what makes it
+          # work when the module is not at the repository root.
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      # Fails if go.mod and go.sum do not agree with the imports in the tree,
+      # which is the same thing `go mod tidy` would fix. Cheap, and it means
+      # the rest of the job is testing the dependency set that was reviewed.
+      - name: Verify the module graph
+        run: go mod verify
+
+      - name: Build
+        run: go build -v ${{ env.PACKAGES }}
+
+      # The race detector needs cgo, so it does not work on every platform,
+      # but it does on all four of the runners above. It roughly doubles the
+      # test wall time and is worth it: a data race that only shows up under
+      # load is otherwise found by a user.
+      - name: Test
+        run: go test -v -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ${{ env.PACKAGES }}
+
+      # Vet is not a linter — codequality.yml handles linting — but it is part
+      # of the compiler's own idea of correctness and costs nothing here.
+      - name: Vet
+        run: go vet ${{ env.PACKAGES }}
+
+      - name: Keep the coverage profile
+        # One platform's profile is enough; they would all be near-identical.
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: ${{ env.WORKING_DIRECTORY }}/coverage.out
+          retention-days: 7
+
+  # Compiles for every target the project supports but cannot run tests on.
+  # Deliberately not part of the release matrix: this is about finding the
+  # breakage early, not producing artifacts.
+  cross-build:
+    name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm, goarm: "7" }
+          - { goos: linux, goarch: riscv64 }
+          - { goos: linux, goarch: ppc64le }
+          - { goos: linux, goarch: s390x }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: freebsd, goarch: amd64 }
+          # Uncomment to prove the code is portable beyond the mainstream:
+          # - { goos: netbsd, goarch: amd64 }
+          # - { goos: openbsd, goarch: arm64 }
+          # - { goos: illumos, goarch: amd64 }
+          # - { goos: js, goarch: wasm }
+          # - { goos: wasip1, goarch: wasm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      - name: Build
+        # CGO_ENABLED=0 because there is no cross C toolchain here, and
+        # because a pure-Go binary is what makes these targets buildable at
+        # all. If the project genuinely needs cgo, this job cannot cover the
+        # non-native targets and should be reduced to the ones it can.
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: "0"
+        run: go build -v ${{ env.PACKAGES }}

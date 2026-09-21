@@ -1,0 +1,95 @@
+name: scorecard
+
+# OpenSSF Scorecard grades the repository's own security posture rather than
+# its code: are actions pinned, are branches protected, is there a fuzzing
+# setup, does the release pipeline produce signed artifacts, is a maintainer
+# still responding. It is the only check here that will tell you your CI
+# configuration is the weak point.
+#
+# The findings arrive as code scanning alerts, so they sit beside the CodeQL
+# ones and can be dismissed individually with a reason.
+#
+# WHAT TO CHANGE
+#   - Almost nothing. This workflow is language-agnostic and repository-shaped.
+#   - `publish_results`: `true` posts the score to the public OpenSSF API and
+#     lets you show a badge. Set it to `false` for anything you would rather
+#     not have a public security grade for. It must be `false` on a private
+#     repository; the run fails otherwise.
+#
+# WHAT IT NEEDS
+#   - A public repository for the default configuration. On a private one, set
+#     publish_results to false and supply a PAT (see the commented `repo_token`
+#     below), because several checks read settings the default token cannot.
+#   - Branch protection checks additionally need a PAT with `repo` scope even
+#     on a public repository; without it those particular checks report as
+#     inconclusive rather than failing the run, which is usually fine.
+#
+# WHAT IT PRODUCES
+#   - Alerts under Security -> Code scanning, tagged as coming from Scorecard.
+#   - A `results.sarif` artifact, kept briefly, for reading the raw output.
+#   - With publish_results: true, a badge:
+#       https://api.securityscorecards.dev/projects/github.com/OWNER/REPO/badge
+
+on:
+  # Scorecard grades things that drift without any commit: a stale action pin,
+  # an unprotected branch, an unanswered issue. A weekly run is the point.
+  schedule:
+    - cron: "41 4 * * 1"
+  # Also on push to the default branch, so a change to branch protection or to
+  # the workflows themselves is graded immediately. Not on pull requests: the
+  # analysis needs the default branch's settings to mean anything.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Uploading the SARIF as code scanning alerts.
+      security-events: write
+      # publish_results authenticates to the OpenSSF API with a workflow OIDC
+      # token rather than a secret, which is what this permission is for.
+      id-token: write
+      # The Branch-Protection and Webhooks checks read repository settings.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+          # Needed on a private repository, and needed on a public one for the
+          # Branch-Protection check to return a real answer. Create a
+          # fine-grained token with read access to administration and
+          # metadata, store it as a secret, and uncomment:
+          # repo_token: ${{ secrets.SCORECARD_TOKEN }}
+
+      # Kept because the code scanning view collapses some of the detail, and
+      # because a failed upload otherwise loses the run entirely.
+      - name: Keep the raw results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: results.sarif
+          category: scorecard

@@ -1,0 +1,127 @@
+name: fmt
+
+# Catches formatting and tidiness problems that would otherwise arrive as
+# review comments. Kept separate from codequality.yml on purpose: these
+# failures have a mechanical fix, the log says exactly what it is, and nobody
+# needs to think about them. A linter finding needs a decision; a formatting
+# finding needs one command.
+#
+# Four checks, all of which fail rather than reformat. A workflow that pushes
+# formatting commits back to a branch fights the developer's editor and breaks
+# on forks.
+#
+# WHAT TO CHANGE
+#   1. `WORKING_DIRECTORY`, if go.mod is not at the repository root.
+#   2. `GOFUMPT` below. gofumpt is a strict superset of gofmt: everything it
+#      does is a formatting change gofmt would accept but not make. Set it to
+#      "false" to check plain `gofmt` only.
+#   3. The generated-file exclusions in the tidy check, if the project commits
+#      protobuf or mock output that its generator formats differently.
+#
+# WHAT IT NEEDS
+#   - Nothing. No secrets.
+#   - A committed go.sum for the tidy check to mean anything.
+#
+# WHAT IT PRODUCES
+#   - A single status check. Its log names every offending file and prints the
+#     diff, and the failure message says which command fixes it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fmt-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKING_DIRECTORY: "."
+  GO_VERSION: "stable"
+  # gofumpt applies the formatting decisions gofmt leaves alone. Set to
+  # "false" to check gofmt only.
+  GOFUMPT: "true"
+  GOFUMPT_VERSION: "v0.12.0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      # `gofmt -l` lists misformatted files and exits 0 either way, so the
+      # output has to be tested rather than the exit status.
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          out=$(gofmt -l -e .)
+          if [ -n "$out" ]; then
+            echo "::error::These files are not gofmt-formatted. Run: gofmt -w ."
+            echo "$out"
+            gofmt -d -e . || true
+            exit 1
+          fi
+          echo "gofmt: clean"
+
+      - name: gofumpt
+        if: env.GOFUMPT == 'true'
+        run: |
+          set -euo pipefail
+          go install "mvdan.cc/gofumpt@${GOFUMPT_VERSION}"
+          out=$("$(go env GOPATH)/bin/gofumpt" -l -e .)
+          if [ -n "$out" ]; then
+            echo "::error::These files are not gofumpt-formatted. Run: gofumpt -w ."
+            echo "$out"
+            "$(go env GOPATH)/bin/gofumpt" -d -e . || true
+            exit 1
+          fi
+          echo "gofumpt: clean"
+
+      # go.mod and go.sum drift constantly: a removed import leaves a
+      # dependency behind, an added one is often committed without the sum.
+      # `go mod tidy` then produces a diff on somebody else's unrelated pull
+      # request. Checking it here means it is always the fault of the pull
+      # request that caused it.
+      - name: go mod tidy
+        run: |
+          set -euo pipefail
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          if ! diff -u go.mod.orig go.mod || ! diff -u go.sum.orig go.sum; then
+            echo "::error::go.mod or go.sum is not tidy. Run: go mod tidy"
+            exit 1
+          fi
+          rm -f go.mod.orig go.sum.orig
+          echo "go mod tidy: clean"
+
+      # Catches the `//go:generate` output that was regenerated locally but
+      # not committed, and the kind that was hand-edited. Skipped silently if
+      # the project has no generate directives.
+      - name: go generate
+        run: |
+          set -euo pipefail
+          if ! grep -rq --include='*.go' '^//go:generate' .; then
+            echo "no go:generate directives; skipping"
+            exit 0
+          fi
+          go generate ./...
+          if ! git diff --exit-code --stat -- .; then
+            echo "::error::Generated files are out of date. Run: go generate ./..."
+            git diff -- .
+            exit 1
+          fi
+          echo "go generate: clean"

@@ -1,0 +1,300 @@
+name: Release
+
+# Cuts a release and publishes a signed, attested binary for every platform
+# the project supports.
+#
+# The shape is: release-please holds a release pull request open against main,
+# accumulating the changelog from conventional commit subjects. Merging that
+# pull request tags the release, and the tag is what unblocks the build jobs.
+# Nothing here runs on an ordinary merge.
+#
+# WHAT EACH ARTIFACT COMES WITH
+#   archive.tar.gz            the binary, README and LICENSE
+#   archive.tar.gz.sha256     the checksum, for a quick manual check
+#   archive.tar.gz.sigstore   a Sigstore bundle: signature, certificate and
+#                             inclusion proof in one file
+#   archive.spdx.json         an SBOM of what went into the binary
+#   SHA256SUMS(.sigstore)     every checksum in one signed file
+#   plus, in GitHub's attestation store, a signed SLSA provenance statement
+#   and a signed SBOM attestation for each archive
+#
+# None of that needs a key. Both the provenance and the cosign signature use
+# the workflow's OIDC identity, so what a verifier checks is "this artifact
+# was built by this workflow, in this repository, from this commit" rather
+# than "somebody who holds a key said so". There is no private key to leak,
+# rotate, or hand to a successor.
+#
+# HOW A USER VERIFIES IT
+#   gh attestation verify ./tool-v1.2.3-linux-amd64.tar.gz --repo OWNER/REPO
+#
+#   cosign verify-blob \
+#     --bundle tool-v1.2.3-linux-amd64.tar.gz.sigstore \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     --certificate-identity-regexp '^https://github.com/OWNER/REPO/' \
+#     ./tool-v1.2.3-linux-amd64.tar.gz
+#
+# WHAT TO CHANGE
+#   1. `BINARY_NAME` and `MAIN_PACKAGE` below. These are the two that matter.
+#   2. `WORKING_DIRECTORY`, if go.mod is not at the repository root.
+#   3. `VERSION_VAR`, if the binary reports its own version. It is the fully
+#      qualified name of a package-level string variable, e.g.
+#      "main.version" or "github.com/you/tool/internal/build.Version".
+#      Set it empty to skip the -X ldflag entirely.
+#   4. The build matrix. Add or remove GOOS/GOARCH pairs; `go tool dist list`
+#      prints every pair Go knows. Each becomes one archive on the release.
+#   5. `EXTRA_FILES`, for anything else that belongs in the archive
+#      (a man page, a shell completion, a default config).
+#
+# WHAT IT NEEDS
+#   - release-please-config.json and .release-please-manifest.json at the
+#     repository root. See universal/ in this library for both.
+#   - Squash merging, with the pull request title as the commit subject:
+#       Settings -> General -> Pull Requests -> Default commit message
+#     release-please reads those subjects and nothing else.
+#   - A public repository, or GitHub Advanced Security, for the attestation
+#     steps. On a private repository without it, delete the two attest steps;
+#     the cosign bundle still works.
+#   - No secrets. Everything is the workflow's own OIDC token.
+#
+# WHAT IT PRODUCES
+#   - A GitHub release, tagged, with the artifacts above attached.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WORKING_DIRECTORY: "."
+  GO_VERSION: "stable"
+  # The name the binary is installed as, and the stem of every archive.
+  BINARY_NAME: "createapt-go"
+  # The package containing func main, relative to WORKING_DIRECTORY.
+  MAIN_PACKAGE: "./cmd/createapt-go"
+  # Package-level string to stamp the version into. Empty to skip.
+  # cmd/createapt-go/root.go: `var version = "dev"`.
+  VERSION_VAR: "main.version"
+  # Files copied into every archive alongside the binary. Space-separated.
+  # Add LICENSE here once the repository has one.
+  EXTRA_FILES: "README.md"
+
+jobs:
+  # Keeps a release pull request up to date with every conventional commit
+  # landed on main. Merging it tags the release and unblocks the builds.
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    # Everything cross-compiles from one Linux runner. Go needs no per-target
+    # toolchain, so there is nothing to gain from matching runner to target,
+    # and a single runner keeps the builds byte-identical between releases.
+    runs-on: ubuntu-latest
+    permissions:
+      # Uploading the artifacts to the release.
+      contents: write
+      # Requesting the OIDC token that both the attestations and the cosign
+      # signature are bound to. Without this the signing steps fail with a
+      # message about no token being available.
+      id-token: write
+      # Writing to the repository's attestation store.
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: linux, goarch: arm, goarm: "7" }
+          - { goos: linux, goarch: riscv64 }
+          - { goos: linux, goarch: ppc64le }
+          - { goos: linux, goarch: s390x }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: freebsd, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      - name: Build
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          # A static binary. It is what makes one Linux artifact run on any
+          # distribution, and what makes these targets cross-buildable at all.
+          CGO_ENABLED: "0"
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          out="dist/${BINARY_NAME}"
+          [ "$GOOS" = "windows" ] && out="${out}.exe"
+          mkdir -p dist
+
+          # -trimpath removes the builder's absolute paths from the binary,
+          # which is both a small privacy matter and a prerequisite for two
+          # builds of the same commit producing the same bytes.
+          # -s -w drop the symbol table and DWARF data; on a typical Go binary
+          # that is a third of the size and nothing a user needs.
+          ldflags="-s -w"
+          if [ -n "${VERSION_VAR}" ]; then
+            ldflags="${ldflags} -X ${VERSION_VAR}=${TAG}"
+          fi
+
+          go build -v -trimpath -ldflags "${ldflags}" -o "$out" "${MAIN_PACKAGE}"
+          ls -l dist
+
+      - name: Package
+        id: package
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          name="${BINARY_NAME}-${TAG}-${GOOS}-${GOARCH}"
+          mkdir -p "staging/${name}"
+          if [ "$GOOS" = "windows" ]; then
+            cp "dist/${BINARY_NAME}.exe" "staging/${name}/"
+          else
+            cp "dist/${BINARY_NAME}" "staging/${name}/"
+          fi
+          # Unquoted on purpose: EXTRA_FILES is a space-separated list.
+          # shellcheck disable=SC2086
+          [ -n "${EXTRA_FILES}" ] && cp ${EXTRA_FILES} "staging/${name}/"
+
+          cd staging
+          if [ "$GOOS" = "windows" ]; then
+            archive="${name}.zip"
+            zip -qr "$archive" "$name"
+          else
+            # --sort=name and a fixed mtime, so the same commit tars to the
+            # same bytes rather than embedding the build time.
+            archive="${name}.tar.gz"
+            tar --sort=name --owner=0 --group=0 --numeric-owner \
+                --mtime="@${SOURCE_DATE_EPOCH:-0}" \
+                -czf "$archive" "$name"
+          fi
+          sha256sum "$archive" > "${archive}.sha256"
+
+          {
+            echo "name=${name}"
+            echo "archive=${archive}"
+            echo "dir=${{ env.WORKING_DIRECTORY }}/staging"
+          } >> "$GITHUB_OUTPUT"
+
+      # A signed SLSA provenance statement: which workflow, at which commit,
+      # on which runner, produced exactly these bytes. Stored by GitHub
+      # against the repository, not in the release, and checked with
+      # `gh attestation verify`.
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.dir }}/${{ steps.package.outputs.archive }}
+
+      # Syft reads the Go binary's embedded module list, so the SBOM describes
+      # what is actually linked in rather than what go.mod asks for.
+      - name: Generate an SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: ${{ steps.package.outputs.dir }}/${{ steps.package.outputs.name }}
+          format: spdx-json
+          output-file: ${{ steps.package.outputs.dir }}/${{ steps.package.outputs.name }}.spdx.json
+          # This workflow attaches the SBOM to the release itself, below.
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ steps.package.outputs.dir }}/${{ steps.package.outputs.archive }}
+          sbom-path: ${{ steps.package.outputs.dir }}/${{ steps.package.outputs.name }}.spdx.json
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Belt and braces alongside the attestation above. The attestation lives
+      # in GitHub's store and needs `gh` to check; this bundle sits next to the
+      # artifact and can be checked by anyone with cosign and no GitHub
+      # account. Keyless: the certificate is issued to this workflow's OIDC
+      # identity, so there is no key to manage.
+      - name: Sign the archive
+        working-directory: ${{ steps.package.outputs.dir }}
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          COSIGN_YES: "true"
+        run: cosign sign-blob --bundle "${ARCHIVE}.sigstore" "$ARCHIVE"
+
+      - name: Upload to the release
+        working-directory: ${{ steps.package.outputs.dir }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          NAME: ${{ steps.package.outputs.name }}
+        run: |
+          gh release upload "$TAG" \
+            "$ARCHIVE" \
+            "${ARCHIVE}.sha256" \
+            "${ARCHIVE}.sigstore" \
+            "${NAME}.spdx.json" \
+            --clobber
+
+  # One SHA256SUMS covering every platform, so a user or a package manager can
+  # fetch a single file and check whichever archive they downloaded. Signed
+  # too, because an unsigned checksum file is only as trustworthy as the
+  # connection that fetched it.
+  checksums:
+    name: checksums
+    needs: [release-please, build]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Combine and sign the checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          mkdir sums && cd sums
+          gh release download "$TAG" --pattern '*.sha256' --dir .
+          # sort so the file is stable between runs regardless of the order
+          # the matrix jobs happened to finish in.
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+          cosign sign-blob --bundle SHA256SUMS.sigstore SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS SHA256SUMS.sigstore --clobber

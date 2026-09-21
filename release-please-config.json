@@ -1,0 +1,79 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+
+  "//": [
+    "release-please's configuration. Copy this and .release-please-manifest.json",
+    "to the repository root; every release.yml in this library expects both",
+    "there by these names.",
+    "",
+    "WHAT TO CHANGE",
+    "  1. `release-type` under `packages`. This is the only field that must",
+    "     change. It decides which files release-please rewrites the version",
+    "     into. Valid values for the languages in this library:",
+    "       go      simple    (release-please will not edit go.mod; see below)",
+    "       python  python    (pyproject.toml, __init__.py, setup.py)",
+    "       rust    rust      (Cargo.toml and Cargo.lock)",
+    "       node    node      (package.json and the lock file)",
+    "       java    maven     (every pom.xml in the reactor)",
+    "       cmake   simple    (plus extra-files, below)",
+    "       zig     simple    (plus extra-files, below)",
+    "     `simple` means release-please tags and writes the changelog but edits",
+    "     no manifest. Use `extra-files` to point it at whatever holds the",
+    "     version instead.",
+    "  2. `extra-files`, for a version string release-please does not know",
+    "     about: a CMake project() call, build.zig.zon, a Dockerfile LABEL.",
+    "     Mark the line in the file with a comment:",
+    "       set(PROJECT_VERSION 1.2.3) # x-release-please-version",
+    "  3. `bump-minor-pre-major`. True while below 1.0.0, so a breaking change",
+    "     bumps 0.3.x to 0.4.0 rather than to 1.0.0. Remove it at 1.0.0.",
+    "",
+    "GO AND MAJOR VERSIONS",
+    "  For v2 and later, Go requires the module path itself to gain a /v2",
+    "  suffix. release-please will tag v2.0.0 but will not edit go.mod, so that",
+    "  one is a manual step. The same applies to the import paths in every",
+    "  file, which is why a Go v2 is a deliberate project rather than a merge."
+  ],
+
+  "bootstrap-sha": null,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "createapt-go",
+
+      "//": [
+        "The changelog sections. A type with `hidden: true` still counts",
+        "towards the version bump but does not appear in the changelog, which",
+        "is what keeps a hundred Dependabot commits out of the release notes.",
+        "Keep this list in step with pr-title.yml's `task_types`, or a title",
+        "that passes the check can produce a commit release-please ignores."
+      ],
+      "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance" },
+        { "type": "revert", "section": "Reverts" },
+        { "type": "docs", "section": "Documentation" },
+        { "type": "refactor", "section": "Refactoring", "hidden": true },
+        { "type": "test", "section": "Tests", "hidden": true },
+        { "type": "build", "section": "Build System", "hidden": true },
+        { "type": "ci", "section": "CI", "hidden": true },
+        { "type": "chore", "section": "Miscellaneous", "hidden": true }
+      ],
+
+      "//extra-files": [
+        "Uncomment and adapt for a version string release-please cannot find",
+        "on its own. Each named file needs the marker comment on the version",
+        "line: # x-release-please-version"
+      ],
+      "extra-files": [],
+
+      "include-component-in-tag": false,
+      "include-v-in-tag": true,
+      "draft": false,
+      "prerelease": false
+    }
+  }
+}

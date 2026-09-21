@@ -1,0 +1,47 @@
+name: pr-title
+
+# Checks that a pull request title is a conventional commit, and labels the
+# pull request with its type.
+#
+# The title is what matters rather than the individual commits, because these
+# pull requests are squash merged with the title as the commit subject. That
+# commit subject is what release-please.yml reads to work out the next version
+# and write the changelog, so a title that is not conventional is a release
+# that silently does not happen.
+
+on:
+  pull_request:
+    # The title can only change on these. Not synchronize: pushing more commits
+    # cannot alter a title, so re-running there is wasted.
+    types:
+      - opened
+      - edited
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  # A title edited several times in a row only needs its last state checked.
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      # add_label writes a type label onto the pull request. A pull request
+      # from a fork gets a read-only token, so the labelling will fail there;
+      # set add_label to 'false' if this repository starts taking fork pull
+      # requests and you would rather not switch to pull_request_target.
+      pull-requests: write
+    steps:
+      - name: Check the pull request title
+        uses: ytanikin/pr-conventional-commits@639145d78959c53c43112365837e3abd21ed67c1 # 1.5.2
+        with:
+          # Kept in step with the changelog sections in
+          # release-please-config.json. A type that is not listed here fails
+          # the check.
+          task_types: >-
+            ["feat","fix","perf","refactor","docs","test","build","ci","chore","revert"]
+          add_label: 'true'

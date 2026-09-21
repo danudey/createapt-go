@@ -1,0 +1,110 @@
+name: codequality
+
+# Static analysis, reported as code scanning alerts rather than as a wall of
+# text in a log.
+#
+# golangci-lint runs a few dozen analysers in one pass over one type-check of
+# the package graph, which is why it is faster than the same linters run
+# separately. Its SARIF output is uploaded to the Code scanning tab, so each
+# finding becomes an alert with a location, a rule, and a history: it appears
+# when introduced, closes when fixed, and can be dismissed with a reason. That
+# is the difference between a linter people act on and one people mute.
+#
+# WHAT TO CHANGE
+#   1. `WORKING_DIRECTORY`, if go.mod is not at the repository root.
+#   2. `.golangci.yml` in the repository. The action deliberately does not
+#      choose linters for you; without a config file you get golangci-lint's
+#      small default set. A reasonable starting configuration is in the
+#      README beside this file, and it is the single most useful thing to
+#      tune here.
+#   3. `GOLANGCI_VERSION`. Pinned rather than `latest`, because a new
+#      golangci-lint release enables new checks and would otherwise turn a
+#      green main branch red without a commit.
+#
+# WHAT IT NEEDS
+#   - A public repository, or GitHub Advanced Security on a private one, for
+#     the SARIF upload. Without it the upload step 403s; set
+#     `continue-on-error: true` on that step, or delete it and read the
+#     annotations instead.
+#   - A `.golangci.yml` for this to be worth more than `go vet`.
+#
+# WHAT IT PRODUCES
+#   - Alerts under Security -> Code scanning, categorised as `golangci-lint`.
+#   - A failing job when a new finding appears, so it blocks a pull request
+#     rather than only being recorded.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # The linters find new things as their own rule sets grow, without this
+    # repository changing.
+    - cron: "31 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codequality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKING_DIRECTORY: "."
+  GO_VERSION: "stable"
+  # Bumped by Dependabot? No: this is a tool version, not a dependency. Watch
+  # https://github.com/golangci/golangci-lint/releases and raise it
+  # deliberately, so new checks land in a commit of their own.
+  GOLANGCI_VERSION: "v2.13.2"
+
+jobs:
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Writing the SARIF results as code scanning alerts.
+      security-events: write
+      # Alert deduplication reads the run metadata.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_VERSION }}
+          working-directory: ${{ env.WORKING_DIRECTORY }}
+          # Two outputs at once: SARIF to a file for the upload below, and
+          # text to stdout so the log is readable. `--output.text.path` of
+          # stdout is what keeps the log; without it the run looks silent.
+          args: >-
+            --output.sarif.path=golangci-lint.sarif
+            --output.text.path=stdout
+            --timeout=10m
+        # The upload has to happen even when the lint fails, otherwise the
+        # findings that caused the failure never reach the security tab. The
+        # job is still failed, by the explicit check at the end.
+        continue-on-error: true
+        id: lint
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: ${{ env.WORKING_DIRECTORY }}/golangci-lint.sarif
+          category: golangci-lint
+          wait-for-processing: true
+
+      # Re-asserts the lint result after the upload, so a finding both appears
+      # as an alert and blocks the pull request.
+      - name: Fail if the lint found anything
+        if: steps.lint.outcome == 'failure'
+        run: |
+          echo "golangci-lint reported findings; see the Code scanning tab." >&2
+          exit 1

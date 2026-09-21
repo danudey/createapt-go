@@ -1,0 +1,156 @@
+name: codeql
+
+# GitHub's own static analysis. This is the one code-quality workflow worth
+# having in every repository regardless of language: it looks for security
+# defects (injection, path traversal, unsafe deserialisation, hard-coded
+# credentials) rather than style problems, and it writes its results straight
+# into the repository's Code scanning tab. No separate SARIF upload step is
+# needed, because the analyze step does that itself.
+#
+# WHAT TO CHANGE
+#   1. The matrix below. One entry per language in the repository; delete the
+#      ones you do not have, because a language with no matching source files
+#      fails the run. Valid values for `language`:
+#        actions  c-cpp  csharp  go  java-kotlin  javascript-typescript
+#        python  ruby  rust  swift
+#      Keep `actions` even in a single-language repository: it scans the
+#      workflow files in this directory for injection and permission problems.
+#   2. `build-mode` on each entry:
+#        none       interpreted languages, and `actions`
+#                   (actions, javascript-typescript, python, ruby)
+#        autobuild  compiled languages whose ordinary build runs unattended
+#                   (go, java-kotlin, swift, csharp, and usually c-cpp)
+#        manual     compiled languages needing a specific build command. Add
+#                   the build as a step between init and analyze; there is a
+#                   worked example at the bottom of this file.
+#   3. `runner` on each entry. Leave it at ubuntu-latest for everything
+#      except swift, which needs macOS, and c-cpp that will only build on
+#      Windows. The Linux runner is faster and, on a private repository,
+#      considerably cheaper per minute.
+#   4. If the code is not at the repository root, set `source-root` on the init
+#      step. Nothing else in this file cares where the code lives.
+#
+# WHAT IT NEEDS
+#   - A public repository, or GitHub Advanced Security on a private one.
+#     Without either, the upload fails with a 403 and the job goes red.
+#   - No secrets and no tokens.
+#
+# WHAT IT PRODUCES
+#   - Alerts under Security -> Code scanning: deduplicated across runs, closed
+#     automatically once the code is fixed.
+#   - One status check per language, so a branch protection rule can require
+#     "CodeQL (go)" and so on by name.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # CodeQL's query packs are updated independently of this repository, so a
+    # weekly run finds defects in code that has not changed. Off the hour,
+    # which GitHub asks for to spread scheduler load.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    # macOS and Windows runners are only needed for swift and for c-cpp code
+    # that will not build on Linux. Everything else analyses faster and much
+    # more cheaply on ubuntu.
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      # Writing the SARIF results back as code scanning alerts.
+      security-events: write
+      # `autobuild` and the CodeQL bundle download both read from the API.
+      packages: read
+      # Reading the workflow run metadata that alert deduplication needs.
+      actions: read
+      contents: read
+    strategy:
+      # One broken language should still let the others report.
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+            # Named on every entry, even where it is the default, because
+            # actionlint checks matrix keys against the entries it can see
+            # and would flag `matrix.runner` as undefined if only the
+            # commented-out swift entry set it.
+            runner: ubuntu-latest
+          - language: go
+            build-mode: autobuild
+            runner: ubuntu-latest
+          # - language: python
+          #   build-mode: none
+          #   runner: ubuntu-latest
+          # - language: javascript-typescript
+          #   build-mode: none
+          #   runner: ubuntu-latest
+          # - language: rust
+          #   build-mode: none
+          #   runner: ubuntu-latest
+          # - language: java-kotlin
+          #   build-mode: autobuild
+          #   runner: ubuntu-latest
+          # - language: c-cpp
+          #   build-mode: autobuild
+          #   runner: ubuntu-latest
+          # - language: csharp
+          #   build-mode: autobuild
+          #   runner: ubuntu-latest
+          # - language: swift
+          #   build-mode: autobuild
+          #   runner: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # `security-and-quality` adds maintainability and correctness queries
+          # on top of the default security ones. It is noisier. Drop back to
+          # `security-extended`, or delete the line for the default suite, if
+          # the alert list becomes something people stop reading.
+          queries: security-and-quality
+          # Uncomment if the code lives in a subdirectory:
+          # source-root: src
+
+      # Only reached by entries with build-mode: autobuild. CodeQL needs to
+      # watch a compiler run to see a compiled language at all, and autobuild
+      # guesses at the build system. If it guesses wrong, switch that entry to
+      # build-mode: manual and replace this step with the real build.
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+
+      # Worked example of build-mode: manual. Delete the autobuild step above
+      # for that language, set build-mode: manual on its matrix entry, and put
+      # the build here. It has to compile every source file you want analysed:
+      # anything the compiler does not touch is invisible to CodeQL.
+      #
+      # - name: Build
+      #   if: matrix.build-mode == 'manual'
+      #   shell: bash
+      #   run: |
+      #     cmake -B build -DCMAKE_BUILD_TYPE=Release
+      #     cmake --build build --parallel
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          # Distinguishes this language's results from the others in the Code
+          # scanning tab, and stops one language's run from retiring another's
+          # alerts.
+          category: /language:${{ matrix.language }}

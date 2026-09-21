@@ -1,0 +1,10 @@
+# Build output
+/bin/
+# Anchored to the repository root so it ignores a top-level `go build` binary
+# without also matching the cmd/createapt-go/ source directory.
+/createapt-go
+
+# Sample packages built by reference/gen.sh. They are regenerable and the .deb
+# files are binary, so they are not worth versioning.
+/reference/packages/
+/reference/build/

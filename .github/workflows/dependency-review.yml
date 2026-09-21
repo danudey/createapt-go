@@ -1,0 +1,65 @@
+name: dependency-review
+
+# Blocks a pull request that introduces a dependency with a known advisory, or
+# one under a licence you have not agreed to take. This is the cheapest of the
+# supply-chain checks: it reads the manifest and lock file diff rather than
+# building anything, so it finishes in seconds.
+#
+# It is deliberately different from the per-language audit workflows. Those ask
+# "is anything we already depend on vulnerable today", run on a schedule, and
+# fail the default branch when a new advisory lands. This one asks "does this
+# pull request make things worse", and only ever looks at what the pull request
+# adds.
+#
+# WHAT TO CHANGE
+#   - `fail-on-severity`: the floor at which a pull request is blocked.
+#     Reasonable values: critical, high, moderate, low. `high` is the usual
+#     starting point; `moderate` if the project ships to other people.
+#   - `deny-licenses` / `allow-licenses`: pick one, not both. Deny-lists are
+#     easier to live with; allow-lists are stricter and will block a
+#     transitive dependency the first time it appears.
+#   - `comment-summary-in-pr`: set to `never` if the pull request comments are
+#     unwelcome. The job status still reports.
+#
+# WHAT IT NEEDS
+#   - A public repository, or GitHub Advanced Security (the dependency graph)
+#     on a private one.
+#   - A committed lock file for the check to be worth much. Without one the
+#     action can only see direct dependency ranges, not what actually resolves.
+#
+# WHAT IT PRODUCES
+#   - A pass/fail status check, and a table of added and removed dependencies
+#     as a pull request comment.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Writing the summary comment onto the pull request.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Review the dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          # Copyleft licences, which most projects cannot absorb into a
+          # permissively licensed binary. Trim or extend to taste; the names
+          # are SPDX identifiers.
+          deny-licenses: >-
+            AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later,
+            GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later,
+            LGPL-2.0-only, LGPL-2.0-or-later, LGPL-3.0-only, LGPL-3.0-or-later
+          comment-summary-in-pr: on-failure

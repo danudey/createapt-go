@@ -1,0 +1,117 @@
+version: "2"
+
+# Read by .github/workflows/codequality.yml. Without this file golangci-lint
+# runs its small default set and the workflow is barely more than `go vet`.
+
+run:
+  # test/e2e is behind a build tag, so without this it is never type-checked
+  # and never linted — the one part of the tree where that is least obvious.
+  build-tags:
+    - e2e
+
+linters:
+  default: standard
+  enable:
+    # Correctness
+    - errcheck        # an unchecked error return
+    - errorlint       # %v where %w was meant, and vice versa
+    - nilerr          # `return nil` after checking err != nil
+    - bodyclose       # an HTTP response body never closed
+    - contextcheck    # a function that should take a context and does not
+    - noctx           # an HTTP request built without one
+    - copyloopvar
+    - exhaustive      # a switch over an enum missing a case
+    - makezero
+    # Security
+    - gosec           # no separate gosec job; running both duplicates findings
+    # Style
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - misspell
+    - godot
+    - goconst
+    - gocritic
+  settings:
+    errcheck:
+      # Not checking the error from these is idiomatic rather than a bug.
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (*compress/gzip.Reader).Close
+        - (*github.com/klauspost/compress/zstd.Decoder).Close
+        - (*golang.org/x/crypto/ssh.Session).Close
+        - (*github.com/danudey/createapt-go/pkg/repo.Repo).Close
+        # Writes to a command's own stdout/stderr. If the terminal has gone
+        # away there is nothing useful left to report the failure to.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Removing a temporary file or directory is always best effort: every
+        # call site is either cleanup on an error path or a no-op after a
+        # successful rename. A failure has no bearing on the operation's result.
+        - os.Remove
+        - os.RemoveAll
+    exhaustive:
+      default-signifies-exhaustive: true
+    revive:
+      rules:
+        # No checkPrivateReceivers: the rule's job is documenting the public
+        # API, and a method on an unexported type (every backend implementation
+        # is one) never appears in godoc. Requiring "Get implements Backend."
+        # twenty-two times documents nothing the interface does not already.
+        - name: exported
+          arguments: [disableStutteringCheck]
+    gosec:
+      excludes:
+        # Weak random is fine outside cryptography; flag it per-line instead.
+        - G404
+        # Duplicates errcheck, which is enabled above and reports more precisely.
+        - G104
+        # Signing and key lookup are this tool's job, and they are done by
+        # running gpg. Every such call is built from a fixed argv with
+        # operator-supplied paths and key IDs; none of it is shell-interpreted.
+        # Flagging each one says nothing a reader can act on.
+        - G204
+        # Likewise, a repository tool opens the files the operator names. Path
+        # containment is enforced where it matters (archive extraction), which
+        # gosec reports separately as G305.
+        - G304
+  exclusions:
+    rules:
+      # noctx's HTTP and net.Dial checks are worth having; its exec.Command
+      # check is not. Every subprocess here is a short-lived local gpg run,
+      # and making it cancellable would mean a
+      # context parameter on most of pkg/sign's exported API for no gain.
+      - linters: [noctx]
+        text: "os/exec.Command must not be called"
+      # MD5 and SHA1 are not used as cryptography here: an apt Release file
+      # carries an MD5Sum block for pre-1.0 clients and may carry a SHA1 one,
+      # and a .dsc records its tarballs' MD5 and SHA1. Refusing to compute them
+      # would mean writing a repository those clients cannot read. SHA256 is
+      # always written alongside, and is the only digest this tool trusts.
+      - path: pkg/aptdata/hash\.go
+        linters: [gosec]
+        text: "(G401|G501|G505)"
+
+      # Test files legitimately do things production code should not.
+      - path: _test\.go
+        linters: [errcheck, gosec, goconst, dupl, unparam, contextcheck]
+      # The e2e suite drives the built binary and shells out; same reasoning.
+      - path: ^test/e2e/
+        linters: [errcheck, gosec, noctx]
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+
+issues:
+  # Report everything, not just what a pull request touched. A repository that
+  # only ever lints the diff never gets clean.
+  new: false
+  # No cap. The defaults (50 issues, 3 per linter) silently hide the rest.
+  max-issues-per-linter: 0
+  max-same-issues: 0

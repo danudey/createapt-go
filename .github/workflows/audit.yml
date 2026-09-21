@@ -1,0 +1,117 @@
+name: audit
+
+# Asks whether anything the project already depends on is known to be
+# vulnerable today. Advisories are published without this repository changing,
+# so this runs on a schedule as well as on pull requests; GitHub emails the
+# repository owner when a scheduled workflow fails on the default branch.
+#
+# Two tools, because they disagree usefully:
+#
+#   govulncheck  reachability. It reads the Go vulnerability database and then
+#                type-checks the call graph, and only reports an advisory if
+#                the vulnerable function is actually reachable from this code.
+#                Very few false positives, so it is the one that gates.
+#
+#   osv-scanner  breadth. It matches the whole lock file against OSV, with no
+#                reachability analysis, and covers advisories with no Go
+#                database entry. Noisier, so it reports to the security tab
+#                rather than failing the build.
+#
+# Running only the first means a vulnerable dependency you happen not to call
+# yet is invisible. Running only the second means a weekly list nobody reads.
+#
+# WHAT TO CHANGE
+#   1. `WORKING_DIRECTORY`, if go.mod is not at the repository root.
+#   2. `PACKAGES`, if only part of the module ships. govulncheck's answer
+#      depends on what you point it at: `./...` includes test-only and
+#      example code, so a vulnerability reachable only from a test will fail
+#      the build. Narrow it to `./cmd/...` if that is not what you want.
+#   3. The cron. Weekly is a reasonable default; daily if the project is
+#     something people deploy.
+#
+# WHAT IT NEEDS
+#   - Nothing for govulncheck. No secrets.
+#   - A public repository, or GitHub Advanced Security, for the osv-scanner
+#     SARIF upload.
+#
+# WHAT IT PRODUCES
+#   - A failing check when a reachable vulnerability exists.
+#   - Alerts under Security -> Code scanning for everything OSV knows about.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Monday morning, off the top of the hour, which GitHub asks for.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKING_DIRECTORY: "."
+  GO_VERSION: "stable"
+  PACKAGES: "./..."
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.WORKING_DIRECTORY }}/go.sum
+
+      # Installed rather than taken from an action, because govulncheck is a
+      # single Go binary and this keeps the toolchain and the analyser on the
+      # same Go version. `@latest` is deliberate here: the value of the tool
+      # is knowing about advisories published this morning.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # Also reports vulnerabilities in the Go standard library and toolchain
+      # itself, which is a common source of a red build that no dependency
+      # bump will fix: the answer there is to raise GO_VERSION.
+      - name: Run govulncheck
+        run: govulncheck -show verbose ${{ env.PACKAGES }}
+
+  osv-scanner:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Scan the lock file
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+        # Exits non-zero when it finds anything, and finding something is the
+        # normal state of a dependency tree of any size. The upload below is
+        # the deliverable; use the alerts to decide what is worth acting on.
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --recursive
+            --format=sarif
+            --output=osv-scanner.sarif
+            ./
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: osv-scanner.sarif
+          category: osv-scanner

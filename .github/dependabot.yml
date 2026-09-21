@@ -1,0 +1,77 @@
+version: 2
+
+# A repository has exactly one .github/dependabot.yml, so this file is the
+# whole thing: the github-actions entry from universal/dependabot.yml plus the
+# Go module entry. Add further entries for any other ecosystem in the
+# repository rather than adding another file.
+
+updates:
+  # The actions in .github/workflows. They are pinned to commit SHAs, which
+  # nothing updates on its own and which no human will notice has gone stale.
+  # Dependabot rewrites both the SHA and the version comment beside it.
+  - package-ecosystem: github-actions
+    # For this ecosystem "/" means .github/workflows, not the repository root.
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - ci
+
+  # The Go module. `directory` is where go.mod lives; change it if the module
+  # is not at the repository root. A repository with several modules needs one
+  # entry each — Dependabot does not walk the tree looking for them. Use
+  # `directories:` with a list if they share a schedule:
+  #   directories:
+  #     - /
+  #     - /tools
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    # "build" rather than "fix": a routine dependency bump should not by
+    # itself cut a release, and release-please keeps `build` out of the
+    # changelog. Change it to "fix" if you would rather every bump reach
+    # consumers as a patch release.
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      # Direct dependencies separately from indirect ones. An indirect bump is
+      # almost always safe to merge unread; a direct one is worth a look, and
+      # mixing them means neither gets the attention it deserves.
+      go-direct:
+        dependency-type: direct
+        patterns:
+          - "*"
+      go-indirect:
+        dependency-type: indirect
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - go
+    # Go modules bump often. Without a cap, a busy dependency tree can fill
+    # the pull request list.
+    open-pull-requests-limit: 10
+    # Dependabot will not raise the `go` directive in go.mod, and raising it
+    # is a decision about which Go versions you support rather than a
+    # dependency update. Do that one by hand.
+    #
+    # To hold a dependency back, uncomment and name it:
+    # ignore:
+    #   - dependency-name: "github.com/example/thing"
+    #     update-types: ["version-update:semver-major"]

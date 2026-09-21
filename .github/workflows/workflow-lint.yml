@@ -1,0 +1,109 @@
+name: workflow-lint
+
+# Lints the workflows themselves. Two tools, because they find different
+# things and neither subsumes the other:
+#
+#   actionlint  correctness. Typos in `runs-on`, `${{ }}` expressions that
+#               reference something that does not exist, invalid `if`
+#               conditions, shellcheck over every `run:` block, matrix keys
+#               that no job reads. Catches the class of mistake that otherwise
+#               only shows up as a failed run on main.
+#
+#   zizmor      security. Script injection through `${{ github.event.* }}`
+#               interpolated into a shell, unpinned action references,
+#               excessive `permissions`, `pull_request_target` used with a
+#               checkout of the fork's head, self-hosted runner exposure,
+#               cache poisoning in release workflows.
+#
+# This is the code-quality scan for the CI configuration, and it is worth
+# having in every repository including ones with no other CI at all.
+#
+# WHAT TO CHANGE
+#   - Nothing, to start with.
+#   - `persona: regular` is the default. `pedantic` adds style findings and
+#     `auditor` adds low-confidence ones worth a human look; both are noisy on
+#     a first run.
+#   - If a finding is a deliberate choice, silence it in the workflow itself
+#     with a `# zizmor: ignore[rule-name]` comment on the offending line
+#     rather than lowering min-severity for everything.
+#
+# WHAT IT NEEDS
+#   - Nothing. No secrets.
+#   - The SARIF upload needs a public repository or GitHub Advanced Security.
+#     On a private repository without it, set `advanced-security: false` on the
+#     zizmor step; findings then appear as job annotations instead.
+#
+# WHAT IT PRODUCES
+#   - actionlint failures as inline annotations on the pull request diff.
+#   - zizmor findings as code scanning alerts under Security -> Code scanning.
+
+on:
+  push:
+    branches: [main]
+    # Only worth running when the CI configuration itself changed.
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".github/dependabot.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/**"
+      - ".github/dependabot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # reviewdog annotates the diff through the checks API.
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint the workflow files
+        uses: reviewdog/action-actionlint@d290e336d5a743810aef4404f757dc862276d2ae # v1.73.4
+        with:
+          # Annotate the diff on a pull request; fall back to a plain check
+          # run elsewhere, because there is no diff to annotate on a push.
+          reporter: ${{ github.event_name == 'pull_request' && 'github-pr-check' || 'github-check' }}
+          # Anything actionlint reports is a real defect in the configuration,
+          # so all of it fails the job.
+          fail_level: any
+          level: warning
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Writing the SARIF findings as code scanning alerts.
+      security-events: write
+      # zizmor's online audits query the API to check whether an action
+      # reference is a tag that has moved, and to resolve pinned SHAs.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit the workflows
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          # Workflows, composite actions, and dependabot.yml. The default
+          # collection mode skips some of those.
+          collect: all
+          persona: regular
+          # Uploads the SARIF to the security tab. Set to false on a private
+          # repository without Advanced Security.
+          advanced-security: true
