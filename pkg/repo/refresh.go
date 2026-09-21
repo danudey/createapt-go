@@ -10,6 +10,7 @@ import (
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/debmeta"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // RefreshResult summarizes a pass of RefreshFromPackages.
@@ -90,16 +91,28 @@ func (r *Repo) RefreshFromPackages(ctx context.Context, opt RefreshOptions) (*Re
 	}
 	sort.Strings(order)
 
+	// Re-reading a remote repository downloads every package, so it is exactly
+	// the kind of run progress is wanted for.
+	var totalBytes int64
+	for _, loc := range order {
+		totalBytes += byLocation[loc].was[0].Size()
+	}
+	r.opt.Progress.Start("re-reading packages", len(order), totalBytes)
+	defer r.opt.Progress.Finish()
+
 	for _, loc := range order {
 		entry := byLocation[loc]
 		published := entry.was[0]
 
-		local, cleanup, err := r.localCopy(ctx, loc)
+		task := r.opt.Progress.Task(loc, published.Size())
+		local, cleanup, err := r.localCopy(ctx, loc, task)
 		if errors.Is(err, backend.ErrNotExist) {
+			task.Done()
 			res.Missing = append(res.Missing, loc)
 			continue
 		}
 		if err != nil {
+			task.Done()
 			return nil, fmt.Errorf("read %s: %w", loc, err)
 		}
 		fresh, err := debmeta.PackageFromFile(local, debmeta.Options{
@@ -108,6 +121,7 @@ func (r *Repo) RefreshFromPackages(ctx context.Context, opt RefreshOptions) (*Re
 			PoolLayout: r.opt.poolLayout(),
 		})
 		cleanup()
+		task.Done()
 		if err != nil {
 			res.Unreadable = append(res.Unreadable, loc)
 			continue
@@ -179,7 +193,7 @@ func (r *Repo) RefreshFromPackages(ctx context.Context, opt RefreshOptions) (*Re
 // objects are already files on this machine it returns the path in place and a
 // no-op cleanup; otherwise it downloads to a temporary file the caller must
 // release through the returned cleanup.
-func (r *Repo) localCopy(ctx context.Context, relpath string) (string, func(), error) {
+func (r *Repo) localCopy(ctx context.Context, relpath string, task *progress.Task) (string, func(), error) {
 	if p, ok := backend.LocalPath(r.be, relpath); ok {
 		// A FileStore reports the path of an object whether or not it exists,
 		// so absence has to be established separately.
@@ -191,7 +205,7 @@ func (r *Repo) localCopy(ctx context.Context, relpath string) (string, func(), e
 		}
 		return p, func() {}, nil
 	}
-	tmp, err := r.GetToFile(ctx, relpath)
+	tmp, err := r.getToFile(ctx, relpath, task)
 	if err != nil {
 		return "", func() {}, err
 	}

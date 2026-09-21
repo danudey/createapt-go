@@ -21,6 +21,7 @@ import (
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/debmeta"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // Signer signs a suite's Release file. apt accepts either an inline-signed
@@ -104,6 +105,11 @@ type Options struct {
 
 	// Signer, if set, signs the Release file.
 	Signer Signer
+
+	// Progress, if set, draws progress bars for the transfers a publish
+	// performs. A nil *progress.Bars is a no-op, which is what a run that was
+	// not asked for progress passes.
+	Progress *progress.Bars
 
 	// now overrides the timestamp source (for tests); zero means time.Now.
 	now int64

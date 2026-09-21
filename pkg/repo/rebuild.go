@@ -9,6 +9,7 @@ import (
 
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // PruneReport summarizes a dependency-aware prune. Removed lists the versions
@@ -175,6 +176,12 @@ func (r *Repo) TotalSize(ctx context.Context) (bytes int64, files int, listed bo
 // GetToFile streams the object at relpath from the backend into a new temporary
 // file and returns its path. The caller owns the file and must remove it.
 func (r *Repo) GetToFile(ctx context.Context, relpath string) (string, error) {
+	return r.getToFile(ctx, relpath, nil)
+}
+
+// getToFile is GetToFile with a progress task to credit the bytes to. task may
+// be nil.
+func (r *Repo) getToFile(ctx context.Context, relpath string, task *progress.Task) (string, error) {
 	rc, err := r.be.Get(ctx, relpath)
 	if err != nil {
 		return "", err
@@ -184,7 +191,7 @@ func (r *Repo) GetToFile(ctx context.Context, relpath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := io.Copy(f, rc); err != nil {
+	if _, err := io.Copy(task.Writer(f), rc); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", err

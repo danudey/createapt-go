@@ -119,6 +119,7 @@ Examples:
 				Concurrency: cf.concurrency,
 				Timeout:     cf.timeout,
 				Deb:         deb,
+				Progress:    bars,
 				Logf:        logf,
 				OnTargetStart: func(t repocheck.Target) {
 					fmt.Fprintf(out, "\n== %s ==\n   %s (suite %s)\n", t.Label, t.BaseURL, t.Suite)

@@ -15,6 +15,7 @@ import (
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/debmeta"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // ConfigPath is the repo-root-relative name of the createapt-go config file.
@@ -262,6 +263,11 @@ type CopyOptions struct {
 	// Progress reports each object as it is handled. action is one of "copy",
 	// "skip" or "delete".
 	Progress func(action string, obj SourceObject)
+
+	// Bars, if set, draws progress bars for the transfers. A copy moves each
+	// object twice — out of the source and into the destination — so the two
+	// passes appear as separate phases of the same task.
+	Bars *progress.Bars
 }
 
 // CopyStats summarizes what a copy transferred.
@@ -279,9 +285,14 @@ type CopyStats struct {
 // Release lands last and the destination is never a torn repository.
 func CopyExact(ctx context.Context, src, dst backend.Backend, objs []SourceObject, opt CopyOptions) (*CopyStats, error) {
 	stats := &CopyStats{}
-	progress := opt.Progress
-	if progress == nil {
-		progress = func(string, SourceObject) {}
+	report := opt.Progress
+	if report == nil {
+		report = func(string, SourceObject) {}
+	}
+
+	if !opt.DryRun {
+		opt.Bars.Start("copying", len(objs), totalSize(objs))
+		defer opt.Bars.Finish()
 	}
 
 	for _, obj := range objs {
@@ -291,7 +302,8 @@ func CopyExact(ctx context.Context, src, dst backend.Backend, objs []SourceObjec
 		}
 		if present && !opt.Force {
 			stats.Skipped++
-			progress("skip", obj)
+			opt.Bars.Item()
+			report("skip", obj)
 			continue
 		}
 		// A dry run reports the transfer without performing it, so it stays
@@ -301,24 +313,28 @@ func CopyExact(ctx context.Context, src, dst backend.Backend, objs []SourceObjec
 			if obj.Size > 0 {
 				stats.Bytes += obj.Size
 			}
-			progress("copy", obj)
+			report("copy", obj)
 			continue
 		}
 
-		local, size, err := fetchToTemp(ctx, src, obj)
+		task := opt.Bars.Task(obj.Path, obj.Size)
+		local, size, err := fetchToTemp(ctx, src, obj, task)
 		if err != nil {
+			task.Done()
 			return nil, err
 		}
 		if opt.Inspect != nil {
 			if err := opt.Inspect(obj, local); err != nil {
+				task.Done()
 				os.Remove(local)
 				return nil, err
 			}
 		}
 		stats.Copied++
 		stats.Bytes += size
-		progress("copy", obj)
-		err = putFile(ctx, dst, obj.Path, local)
+		report("copy", obj)
+		err = putFile(ctx, dst, obj.Path, local, task)
+		task.Done()
 		os.Remove(local)
 		if err != nil {
 			return nil, fmt.Errorf("write %s: %w", obj.Path, err)
@@ -411,8 +427,10 @@ func destinationMatches(ctx context.Context, dst backend.Backend, obj SourceObje
 
 // fetchToTemp streams an object from be into a temporary file, verifying its
 // size and (when the metadata records one) its checksum. The caller owns the
-// returned file and must remove it.
-func fetchToTemp(ctx context.Context, be backend.Backend, obj SourceObject) (string, int64, error) {
+// returned file and must remove it. task, when non-nil, is credited with the
+// bytes as they arrive.
+func fetchToTemp(ctx context.Context, be backend.Backend, obj SourceObject, task *progress.Task) (string, int64, error) {
+	task.Phase("download")
 	rc, err := be.Get(ctx, obj.Path)
 	if err != nil {
 		return "", 0, fmt.Errorf("read %s: %w", obj.Path, err)
@@ -431,7 +449,7 @@ func fetchToTemp(ctx context.Context, be backend.Backend, obj SourceObject) (str
 	}
 
 	h := sha256.New()
-	size, err := io.Copy(io.MultiWriter(f, h), rc)
+	size, err := io.Copy(task.Writer(io.MultiWriter(f, h)), rc)
 	if err != nil {
 		return fail(fmt.Errorf("read %s: %w", obj.Path, err))
 	}
@@ -453,8 +471,9 @@ func fetchToTemp(ctx context.Context, be backend.Backend, obj SourceObject) (str
 	return name, size, nil
 }
 
-// putFile uploads a local file to a backend.
-func putFile(ctx context.Context, be backend.Backend, dest, local string) error {
+// putFile uploads a local file to a backend. task, when non-nil, is credited
+// with the bytes as they go out.
+func putFile(ctx context.Context, be backend.Backend, dest, local string, task *progress.Task) error {
 	f, err := os.Open(local)
 	if err != nil {
 		return err
@@ -464,7 +483,19 @@ func putFile(ctx context.Context, be backend.Backend, dest, local string) error 
 	if err != nil {
 		return err
 	}
-	return be.Put(ctx, dest, f, fi.Size())
+	task.Phase("upload")
+	return be.Put(ctx, dest, task.Reader(f), fi.Size())
+}
+
+// totalSize sums the objects whose size is known.
+func totalSize(objs []SourceObject) int64 {
+	var total int64
+	for _, o := range objs {
+		if o.Size > 0 {
+			total += o.Size
+		}
+	}
+	return total
 }
 
 // EntryCopyOptions controls CopyEntriesFrom, which brings selected packages
@@ -490,6 +521,11 @@ type EntryCopyOptions struct {
 
 	// Progress reports each file as it is handled. action is "copy" or "skip".
 	Progress func(action string, e aptdata.Entry, location string)
+
+	// Bars, if set, draws progress bars for the transfers. Each file is moved
+	// twice — downloaded, then uploaded — and the two passes appear as separate
+	// phases of the same task.
+	Bars *progress.Bars
 }
 
 // CopyEntriesFrom transfers entries (records from another repository's indexes)
@@ -502,9 +538,14 @@ type EntryCopyOptions struct {
 // transferred again, which is what makes an interrupted copy resumable.
 func (r *Repo) CopyEntriesFrom(ctx context.Context, src backend.Backend, entries []aptdata.Entry, opt EntryCopyOptions) (*CopyStats, error) {
 	stats := &CopyStats{}
-	progress := opt.Progress
-	if progress == nil {
-		progress = func(string, aptdata.Entry, string) {}
+	report := opt.Progress
+	if report == nil {
+		report = func(string, aptdata.Entry, string) {}
+	}
+
+	if !r.opt.DryRun {
+		opt.Bars.Start("copying", entryFileCount(entries), entryTotalBytes(entries))
+		defer opt.Bars.Finish()
 	}
 
 	for _, e := range entries {
@@ -514,7 +555,7 @@ func (r *Repo) CopyEntriesFrom(ctx context.Context, src backend.Backend, entries
 		}
 
 		for _, m := range moves {
-			if err := r.copyOneFile(ctx, src, e, m, opt, stats, progress); err != nil {
+			if err := r.copyOneFile(ctx, src, e, m, opt, stats, report); err != nil {
 				return nil, err
 			}
 		}
@@ -524,7 +565,7 @@ func (r *Repo) CopyEntriesFrom(ctx context.Context, src backend.Backend, entries
 		// actually holds rather than what the source claimed.
 		if opt.RebuildMetadata && !r.opt.DryRun {
 			if p, ok := indexed.(*aptdata.Package); ok {
-				if err := r.reindexFromBackend(ctx, p); err != nil {
+				if err := r.reindexFromBackend(ctx, p, opt.Bars); err != nil {
 					return nil, fmt.Errorf("re-index %s: %w", e.ID3(), err)
 				}
 			}
@@ -541,8 +582,26 @@ type fileMove struct {
 	checksum string
 }
 
+// entryFileCount counts the individual files the entries own.
+func entryFileCount(entries []aptdata.Entry) int {
+	var n int
+	for _, e := range entries {
+		n += len(e.Locations())
+	}
+	return n
+}
+
+// entryTotalBytes sums the sizes the indexes record for the entries' files.
+func entryTotalBytes(entries []aptdata.Entry) int64 {
+	var total int64
+	for _, e := range entries {
+		total += e.TotalBytes()
+	}
+	return total
+}
+
 // copyOneFile transfers a single file of a copied entry.
-func (r *Repo) copyOneFile(ctx context.Context, src backend.Backend, e aptdata.Entry, m fileMove, opt EntryCopyOptions, stats *CopyStats, progress func(string, aptdata.Entry, string)) error {
+func (r *Repo) copyOneFile(ctx context.Context, src backend.Backend, e aptdata.Entry, m fileMove, opt EntryCopyOptions, stats *CopyStats, report func(string, aptdata.Entry, string)) error {
 	if !opt.RebuildMetadata {
 		present, err := destinationMatches(ctx, r.be, SourceObject{
 			Path: m.to, Kind: ObjectPackage, Size: m.size, Checksum: m.checksum,
@@ -553,7 +612,8 @@ func (r *Repo) copyOneFile(ctx context.Context, src backend.Backend, e aptdata.E
 		if present {
 			r.copied[m.to] = m.size
 			stats.Skipped++
-			progress("skip", e, m.to)
+			opt.Bars.Item()
+			report("skip", e, m.to)
 			return nil
 		}
 	}
@@ -564,13 +624,16 @@ func (r *Repo) copyOneFile(ctx context.Context, src backend.Backend, e aptdata.E
 		r.copied[m.to] = m.size
 		stats.Copied++
 		stats.Bytes += m.size
-		progress("copy", e, m.to)
+		report("copy", e, m.to)
 		return nil
 	}
 
+	task := opt.Bars.Task(m.to, m.size)
+	defer task.Done()
+
 	local, size, err := fetchToTemp(ctx, src, SourceObject{
 		Path: m.from, Kind: ObjectPackage, Size: m.size, Checksum: m.checksum,
-	})
+	}, task)
 	if err != nil {
 		return err
 	}
@@ -585,9 +648,9 @@ func (r *Repo) copyOneFile(ctx context.Context, src backend.Backend, e aptdata.E
 	}
 	stats.Copied++
 	stats.Bytes += size
-	progress("copy", e, m.to)
+	report("copy", e, m.to)
 
-	if err := putFile(ctx, r.be, m.to, local); err != nil {
+	if err := putFile(ctx, r.be, m.to, local, task); err != nil {
 		return fmt.Errorf("write %s: %w", m.to, err)
 	}
 	r.copied[m.to] = size
@@ -644,9 +707,13 @@ func (r *Repo) placeCopy(e aptdata.Entry, opt EntryCopyOptions) (aptdata.Entry, 
 
 // reindexFromBackend re-derives a copied binary package's stanza from the file
 // now at the destination, replacing the record carried over from the source.
-func (r *Repo) reindexFromBackend(ctx context.Context, p *aptdata.Package) error {
+func (r *Repo) reindexFromBackend(ctx context.Context, p *aptdata.Package, bars *progress.Bars) error {
 	loc := p.Location()
-	local, cleanup, err := r.localCopy(ctx, loc)
+	// The re-read is not part of the announced transfer, so it is shown without
+	// being counted a second time.
+	task := bars.Aside(loc, p.Size())
+	local, cleanup, err := r.localCopy(ctx, loc, task)
+	task.Done()
 	if err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
+	"github.com/danudey/createapt-go/pkg/progress"
 	"github.com/danudey/createapt-go/pkg/repo"
 	"github.com/danudey/createapt-go/pkg/repoconfig"
 	"github.com/danudey/createapt-go/pkg/sign"
@@ -33,6 +34,9 @@ type globalFlags struct {
 	validity    time.Duration
 	dryRun      bool
 	force       bool
+
+	// progress turns on the transfer progress display.
+	progress bool
 
 	// Release file identity.
 	origin         string
@@ -169,6 +173,7 @@ packages are never downloaded.`,
 	pf.StringVar(&gf.awsProfile, "profile", "", "AWS named profile for S3 access (sets AWS_PROFILE; MFA-protected assume-role profiles are prompted for on stdin)")
 	pf.StringVar(&gf.awsRegion, "region", "", "AWS region for S3 access (sets AWS_REGION); the bucket's actual region is detected and used if it differs")
 	pf.BoolVar(&gf.dryRun, "dry-run", false, "show what would change without transferring anything")
+	pf.BoolVar(&gf.progress, "progress", false, "show a progress bar for the transfer in flight and one for the run as a whole (drawn on stderr; a non-terminal gets a plain line every few seconds)")
 	pf.BoolVar(&gf.force, "force", false, "overwrite a remote file whose content differs from the local one")
 	pf.BoolVar(&gf.insecureIgnoreHostKey, "insecure-ignore-host-key", false, "skip SSH host key verification for sftp:// locations (by default an unreadable ~/.ssh/known_hosts, or a host missing from it, is an error)")
 
@@ -191,6 +196,10 @@ packages are never downloaded.`,
 	return root
 }
 
+// bars is the progress display --progress turns on, and nil otherwise. A nil
+// *progress.Bars is a working no-op, so it is passed to the engine unguarded.
+var bars *progress.Bars
+
 // preRunE runs before every subcommand: it resolves the compatibility profile
 // and validates that signing-related flags are coherent.
 func preRunE(cmd *cobra.Command, args []string) error {
@@ -200,10 +209,30 @@ func preRunE(cmd *cobra.Command, args []string) error {
 	if err := resolveSignRelease(cmd); err != nil {
 		return err
 	}
+	setupProgress(cmd)
 	applyAWSEnv()
 	backend.InsecureIgnoreHostKey = gf.insecureIgnoreHostKey
 	sign.NoPassphrasePrompt = gf.gpgNoPrompt
 	return validateSigningFlags()
+}
+
+// setupProgress builds the progress display and routes the command's own
+// output through it.
+//
+// The bars are drawn on stderr, so a run whose stdout is piped into something
+// else still produces exactly the output it always did. Every other line the
+// command prints has to go through the display as well: written straight to the
+// terminal it would be painted over by the next redraw.
+func setupProgress(cmd *cobra.Command) {
+	// Cleared first so a second command in the same process (the tests) does
+	// not inherit the previous one's display.
+	bars = nil
+	if !gf.progress {
+		return
+	}
+	bars = progress.New(cmd.ErrOrStderr())
+	cmd.SetOut(bars.Writer(cmd.OutOrStdout()))
+	cmd.SetErr(bars.Writer(cmd.ErrOrStderr()))
 }
 
 // envBool reads a boolean from the environment, accepting the spellings a CI
@@ -361,6 +390,7 @@ func repoOptions(create bool) (repo.Options, error) {
 		PruneBreakDeps:             gf.pruneBreakDeps,
 		RemoveUnreferencedPackages: gf.removeUnreferencedPackages,
 		RemoveStaleMetadata:        gf.removeStaleMetadata,
+		Progress:                   bars,
 	}
 
 	hashes, err := aptdata.ParseHashes(gf.hashes)

@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/danudey/createapt-go/pkg/aptdata"
+	"github.com/danudey/createapt-go/pkg/progress"
 	"github.com/danudey/createapt-go/pkg/repo"
 )
 
@@ -164,7 +165,9 @@ it had been verified.`,
 				}
 			}
 
-			res, err := r.Verify(ctx(cmd), repo.VerifyOptions{Checksums: mode, Concurrency: concurrency})
+			res, err := r.Verify(ctx(cmd), repo.VerifyOptions{
+				Checksums: mode, Concurrency: concurrency, Bars: bars,
+			})
 			if err != nil {
 				return err
 			}
@@ -315,15 +318,5 @@ func printSourcesLine(cmd *cobra.Command, r *repo.Repo, baseURL string) {
 }
 
 // humanBytes renders a byte count in the largest unit that keeps it readable.
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
-}
+// The progress display formats the same figures, so both read alike.
+func humanBytes(n int64) string { return progress.HumanBytes(n) }

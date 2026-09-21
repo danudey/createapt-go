@@ -113,6 +113,12 @@ func (r *Repo) Commit(ctx context.Context) (*Plan, error) {
 		return plan, nil
 	}
 
+	// Everything from here on transfers or deletes something, which is what the
+	// progress display measures.
+	items, bytes := publishWork(plan, meta)
+	r.opt.Progress.Start("publishing", items, bytes)
+	defer r.opt.Progress.Finish()
+
 	// 1. Relocate identical files server-side (write the new copy now; the old
 	// copy is removed during GC, after the Release swap, so the repository is
 	// never torn).
@@ -120,6 +126,7 @@ func (r *Repo) Commit(ctx context.Context) (*Plan, error) {
 		if err := r.copyFile(ctx, c.From, c.To); err != nil {
 			return nil, fmt.Errorf("relocate %s -> %s: %w", c.From, c.To, err)
 		}
+		r.opt.Progress.Item()
 	}
 
 	// 2. Upload package files that need transferring. They must be in place
@@ -172,9 +179,33 @@ func (r *Repo) Commit(ctx context.Context) (*Plan, error) {
 			if err := r.be.Delete(ctx, p); err != nil {
 				return nil, fmt.Errorf("delete %s: %w", p, err)
 			}
+			r.opt.Progress.Item()
 		}
 	}
 	return plan, nil
+}
+
+// publishWork counts what Commit is about to do, for the overall progress bar:
+// every file it writes, relocates or deletes, and the bytes the writes amount
+// to. A relocation and a deletion move no bytes through this process, so they
+// count as items only — which is also why the bar is not purely byte-driven.
+func publishWork(plan *Plan, meta *metadataSet) (items int, bytes int64) {
+	items = len(plan.Copies) + len(plan.Uploads) +
+		len(plan.ObsoleteMeta) + len(plan.DeletedFiles) +
+		len(plan.UnreferencedFiles) + len(plan.StaleMetadata)
+	bytes = plan.BytesToUpload
+
+	for _, body := range meta.files {
+		items++
+		bytes += int64(len(body))
+	}
+	for _, body := range [][]byte{meta.release, meta.releaseSig, meta.inRelease} {
+		if body != nil {
+			items++
+			bytes += int64(len(body))
+		}
+	}
+	return items, bytes
 }
 
 // byHashFirst orders index writes so a checksum-named copy is always in place
@@ -743,11 +774,15 @@ func (r *Repo) uploadFile(ctx context.Context, dest, local string) error {
 	if err != nil {
 		return err
 	}
-	return r.be.Put(ctx, dest, f, fi.Size())
+	task := r.opt.Progress.Task(dest, fi.Size())
+	defer task.Done()
+	return r.be.Put(ctx, dest, task.Reader(f), fi.Size())
 }
 
 func (r *Repo) putBytes(ctx context.Context, dest string, data []byte) error {
-	return r.be.Put(ctx, dest, bytesReader(data), int64(len(data)))
+	task := r.opt.Progress.Task(dest, int64(len(data)))
+	defer task.Done()
+	return r.be.Put(ctx, dest, task.Reader(bytesReader(data)), int64(len(data)))
 }
 
 // copyFile relocates an existing file within the backend without transferring

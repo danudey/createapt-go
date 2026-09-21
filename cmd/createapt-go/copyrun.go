@@ -61,6 +61,7 @@ func copyExact(cmd *cobra.Command, src *repo.Repo, srcLoc string, srcCfg *repoco
 		DryRun: gf.dryRun,
 		Force:  gf.force,
 		Prune:  prune,
+		Bars:   bars,
 		Progress: func(action string, obj repo.SourceObject) {
 			fmt.Fprintf(out, "%s%-7s %s\n", prefix, action, obj.Path)
 		},
@@ -201,6 +202,7 @@ func copyRebuilding(cmd *cobra.Command, run copyRun) error {
 		Relocate:        run.relocate || cf.dstComponent != "",
 		Component:       cf.dstComponent,
 		RebuildMetadata: cf.rebuildMetadata,
+		Bars:            bars,
 		Progress: func(action string, e aptdata.Entry, loc string) {
 			fmt.Fprintf(run.out, "%s%-7s %s -> %s\n", prefix, action, e.ID3(), loc)
 		},

@@ -13,6 +13,7 @@ import (
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/debmeta"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // Level selects how deep the checks go. Each level is cumulative.
@@ -89,6 +90,8 @@ type Config struct {
 	Concurrency int
 	// Timeout bounds each individual backend operation. Zero means no timeout.
 	Timeout time.Duration
+	// Progress, if set, draws progress bars while the packages are checked.
+	Progress *progress.Bars
 }
 
 // checker runs validations against targets and accumulates results.
@@ -468,6 +471,20 @@ func (ck *checker) wantsName(name string) bool {
 
 // checkEntries validates the selected entries in parallel.
 func (ck *checker) checkEntries(ctx context.Context, be backend.Backend, label string, entries []aptdata.Entry) {
+	// Only the fetch level moves bytes; below it each file is a single cheap
+	// call, so the bar counts files instead.
+	var files int
+	var bytes int64
+	for _, e := range entries {
+		files += len(e.Locations())
+		if ck.cfg.Level >= LevelFetch {
+			bytes += e.TotalBytes()
+		}
+	}
+	// The target is named by the header printed before its checks, so the bar
+	// spends its width on the figures rather than repeating a long URL.
+	ck.cfg.Progress.Start("checking", files, bytes)
+
 	conc := ck.cfg.Concurrency
 	if conc < 1 {
 		conc = 1
@@ -489,11 +506,13 @@ func (ck *checker) checkEntries(ctx context.Context, be backend.Backend, label s
 // checkEntry validates every file an entry owns.
 func (ck *checker) checkEntry(ctx context.Context, be backend.Backend, label string, e aptdata.Entry) {
 	for _, f := range entryFiles(e) {
+		task := ck.cfg.Progress.Task(f.loc, f.size)
 		if ck.cfg.Level >= LevelFetch {
-			ck.fetchAndVerify(ctx, be, label, e, f)
-			continue
+			ck.fetchAndVerify(ctx, be, label, e, f, task)
+		} else {
+			ck.headCheck(ctx, be, label, e, f)
 		}
-		ck.headCheck(ctx, be, label, e, f)
+		task.Done()
 	}
 }
 
@@ -584,11 +603,11 @@ func (ck *checker) headCheck(ctx context.Context, be backend.Backend, label stri
 // fetchAndVerify downloads a file and proves its size and checksum from its
 // content, then — for a .deb, and when the tooling is available — confirms the
 // archive itself parses.
-func (ck *checker) fetchAndVerify(ctx context.Context, be backend.Backend, label string, e aptdata.Entry, f checkFile) {
+func (ck *checker) fetchAndVerify(ctx context.Context, be backend.Backend, label string, e aptdata.Entry, f checkFile, task *progress.Task) {
 	opCtx, cancel := ck.opCtx(ctx)
 	defer cancel()
 
-	local, size, sum, err := fetchToTempFile(opCtx, be, f.loc)
+	local, size, sum, err := fetchToTempFile(opCtx, be, f.loc, task)
 	if err != nil {
 		ck.add(Result{
 			Target: label, Kind: e.ID3(), Loc: f.loc, Status: StatusFail,

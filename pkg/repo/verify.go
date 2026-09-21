@@ -13,6 +13,7 @@ import (
 
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // Problem is one discrepancy found while verifying a published repository.
@@ -69,6 +70,11 @@ type VerifyOptions struct {
 	// Progress, if set, is called once per entry as its check finishes. It may
 	// be called from several goroutines at once.
 	Progress func(e aptdata.Entry, problems int)
+
+	// Bars, if set, draws progress bars. They only measure something when the
+	// check has to read the files: a backend that hashes content for us
+	// finishes each entry in one cheap call.
+	Bars *progress.Bars
 }
 
 // VerifyResult summarizes a verification pass.
@@ -119,6 +125,15 @@ func (r *Repo) DownloadEstimate() (files int, bytes int64) {
 func (r *Repo) Verify(ctx context.Context, opt VerifyOptions) (*VerifyResult, error) {
 	entries := r.idx.Entries()
 	res := &VerifyResult{Packages: r.idx.Len(), Sources: r.idx.SourceLen()}
+
+	// The bar measures bytes only when the files have to be read; otherwise
+	// each entry is a cheap call and the item count is the whole story.
+	var expectedBytes int64
+	if opt.Checksums == ChecksumContent && !backend.HashesContent(r.be) {
+		expectedBytes = entryTotalBytes(entries)
+	}
+	opt.Bars.Start("verifying", entryFileCount(entries), expectedBytes)
+	defer opt.Bars.Finish()
 
 	conc := opt.Concurrency
 	if conc < 1 {
@@ -199,7 +214,9 @@ func (r *Repo) verifyEntry(ctx context.Context, e aptdata.Entry, opt VerifyOptio
 	var v entryVerdict
 	for _, f := range entryFiles(e) {
 		v.files++
-		r.verifyFile(ctx, e, f, opt, &v)
+		task := opt.Bars.Task(f.location, f.size)
+		r.verifyFile(ctx, e, f, opt, &v, task)
+		task.Done()
 	}
 	return v
 }
@@ -230,7 +247,7 @@ func entryFiles(e aptdata.Entry) []verifiableFile {
 }
 
 // verifyFile checks one published file's presence, size and checksum.
-func (r *Repo) verifyFile(ctx context.Context, e aptdata.Entry, f verifiableFile, opt VerifyOptions, v *entryVerdict) {
+func (r *Repo) verifyFile(ctx context.Context, e aptdata.Entry, f verifiableFile, opt VerifyOptions, v *entryVerdict, task *progress.Task) {
 	fi, err := r.be.Stat(ctx, f.location)
 	switch {
 	case errors.Is(err, backend.ErrNotExist):
@@ -294,7 +311,7 @@ func (r *Repo) verifyFile(ctx context.Context, e aptdata.Entry, f verifiableFile
 	}
 
 	// Content mode against a backend that cannot hash for us: read the object.
-	sum, n, err := hashObject(ctx, r.be, f.location)
+	sum, n, err := hashObject(ctx, r.be, f.location, task)
 	v.downloaded++
 	v.bytesRead += n
 	if err != nil {
@@ -314,14 +331,14 @@ func (r *Repo) verifyFile(ctx context.Context, e aptdata.Entry, f verifiableFile
 // hashObject streams an object from the backend through sha256, returning the
 // hex digest and the number of bytes read. Nothing is buffered: a package of
 // any size costs one pass and no disk.
-func hashObject(ctx context.Context, be backend.Backend, relpath string) (string, int64, error) {
+func hashObject(ctx context.Context, be backend.Backend, relpath string, task *progress.Task) (string, int64, error) {
 	rc, err := be.Get(ctx, relpath)
 	if err != nil {
 		return "", 0, err
 	}
 	defer rc.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, rc)
+	n, err := io.Copy(task.Writer(h), rc)
 	if err != nil {
 		return "", n, err
 	}

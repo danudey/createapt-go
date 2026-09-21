@@ -26,6 +26,7 @@ import (
 
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
+	"github.com/danudey/createapt-go/pkg/progress"
 	"github.com/danudey/createapt-go/pkg/repoconfig"
 )
 
@@ -60,6 +61,11 @@ type Options struct {
 	// Deb is the archive verifier used at the fetch level. Build it with
 	// DetectDebTool.
 	Deb DebTool
+
+	// Progress, if set, draws progress bars while the packages are checked. At
+	// the fetch level, where every package is downloaded, that is the run's
+	// whole cost; at the lighter levels it counts the packages checked.
+	Progress *progress.Bars
 
 	// Logf, when non-nil, receives a line for every individual check.
 	Logf func(format string, args ...any)
@@ -97,8 +103,10 @@ func Run(ctx context.Context, opts Options) (results []Result, warnings []string
 		Packages:    opts.Packages,
 		Concurrency: opts.Concurrency,
 		Timeout:     opts.Timeout,
+		Progress:    opts.Progress,
 	}
 	ck := newChecker(cfg, opts.Deb, opts.Logf)
+	defer opts.Progress.Finish()
 
 	for _, t := range targets {
 		if opts.OnTargetStart != nil {

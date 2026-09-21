@@ -211,6 +211,8 @@ Useful flags (global unless noted):
 --suite NAME              suite (dists/ subdirectory) to operate on (default stable)
 --component NAME          component to place added packages in (default main)
 --dry-run                 show what would change without transferring anything
+--progress                show a progress bar for the transfer in flight and one
+                          for the run as a whole (see "Progress" below)
 --force                   upload every staged file, overwriting the remote copy
                           unconditionally
 --compression LIST        index compression: none,gzip,xz,zstd (default gzip,xz;
@@ -252,6 +254,45 @@ publish, so there is no flag to opt into blob cleanup.
                           prompting (use in CI, where a prompt hangs the job)
 ```
 
+## Progress
+
+`--progress` draws two bars while a command transfers: the file in flight, and
+the run as a whole.
+
+```
+createapt-go add --progress s3://my-bucket/apt dist/*.deb
+
+  pool/main/n/nginx/nginx_1.24.0-2_amd64.deb  [████████░░░░░░░]  54%  3.4 MiB/6.3 MiB
+  publishing                                  [██████░░░░░░░░░]  41%  7/23  74 MiB/180 MiB  8.2 MiB/s  ETA 13s
+```
+
+The bars go to **stderr**, so a run whose stdout is piped or redirected produces
+exactly the output it always did. The lines the command prints as it goes
+(`upload …`, `skip …`) are drawn above the bars rather than through them.
+
+What the overall bar counts depends on the command:
+
+| Command | Counts |
+| --- | --- |
+| `add`, `remove`, `create`, `rebuild` | every file the publish uploads, relocates, writes or deletes |
+| `copy` | each object copied, as two passes — `download` then `upload` |
+| `rebuild --from-packages` | each package re-read (a download, on a remote repository) |
+| `verify --checksums` | each file hashed, and the bytes read to hash it |
+| `check --level fetch` | each package downloaded and verified |
+
+Notes:
+
+- **Not a terminal?** The display degrades to one plain line every few seconds —
+  `publishing: 7/23, 74 MiB/180 MiB (41%), 8.2 MiB/s, ETA 13s` — with no escape
+  sequences, so a CI log stays readable.
+- **Nothing to draw.** `--dry-run` transfers nothing, so nothing is drawn.
+  Likewise `verify` without `--checksums` on a backend that checksums for us:
+  there the bar counts files, because no bytes cross the network.
+- **Parallel checks.** `verify` and `check` run several files at once; the top
+  bar shows the oldest transfer and counts the rest (`(+3 more)`).
+- Byte figures come from the indexes, so an overall bar is only as accurate as
+  the metadata it is publishing or reading.
+
 ## Examples
 
 ```sh
@@ -276,6 +317,9 @@ createapt-go add /srv/repo dist/*.deb dist/*.dsc
 
 # Preview an update without changing anything.
 createapt-go add /srv/repo new.deb --dry-run
+
+# Watch a large upload go out.
+createapt-go add --progress s3://my-bucket/apt dist/*.deb
 ```
 
 After a publish, clients subscribe with the line `create` prints (given

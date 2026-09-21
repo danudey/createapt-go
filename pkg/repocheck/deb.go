@@ -12,6 +12,7 @@ import (
 
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/debmeta"
+	"github.com/danudey/createapt-go/pkg/progress"
 )
 
 // errDebToolUnavailable reports that archive verification was skipped because
@@ -72,8 +73,9 @@ func readAll(ctx context.Context, be backend.Backend, relpath string) ([]byte, e
 }
 
 // fetchToTempFile streams an object into a temporary file, returning its path,
-// size and sha256. The caller owns the file.
-func fetchToTempFile(ctx context.Context, be backend.Backend, relpath string) (local string, size int64, sum string, err error) {
+// size and sha256. The caller owns the file. task, when non-nil, is credited
+// with the bytes as they arrive.
+func fetchToTempFile(ctx context.Context, be backend.Backend, relpath string, task *progress.Task) (local string, size int64, sum string, err error) {
 	rc, err := be.Get(ctx, relpath)
 	if err != nil {
 		return "", 0, "", err
@@ -87,7 +89,7 @@ func fetchToTempFile(ctx context.Context, be backend.Backend, relpath string) (l
 	name := f.Name()
 
 	h := sha256.New()
-	size, err = io.Copy(io.MultiWriter(f, h), rc)
+	size, err = io.Copy(task.Writer(io.MultiWriter(f, h)), rc)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
