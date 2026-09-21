@@ -58,8 +58,8 @@ content is not transferred again — an interrupted copy resumes cheaply with
 Any option that selects a subset of the packages, moves them, renames the suite
 or component, or rebuilds the indexes switches the copy to regenerating the
 destination's metadata. That invalidates the source's Release signature, so when
-the source is signed such an option requires re-signing the copy with
---sign-release and a key of your own.
+the source is signed such an option requires re-signing the copy with a key of
+your own (--gpg-key or --gpg-key-id).
 
 Writing into a suite that already exists needs one of:
   --overwrite  replace it; files the source does not have are deleted
@@ -77,7 +77,7 @@ Examples:
   # packages, and sign the rebuilt indexes with our own key.
   createapt-go copy /srv/upstream /srv/mirror \
       --latest-only --arch amd64 --exclude-kinds debug,source \
-      --sign-release --gpg-key-id releases@example.com
+      --gpg-key-id releases@example.com
 
   # Pull this week's new packages into an existing mirror.
   createapt-go copy /srv/upstream /srv/mirror --update`,
@@ -204,7 +204,7 @@ func runCopy(cmd *cobra.Command, srcLoc, dstLoc string, cf *copyFlags) error {
 	}
 
 	if !transform {
-		return copyExact(cmd, src, srcLoc, srcCfg, dstBE, dstLoc, dstExists, cf)
+		return copyExact(cmd, src, srcLoc, srcCfg, dstBE, dstLoc, dstExists, sourceSigned, cf)
 	}
 
 	// Set the destination's suite and component before the repo is opened, so

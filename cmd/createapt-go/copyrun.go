@@ -18,10 +18,19 @@ import (
 // so the destination is byte-identical to the source and any Release signature
 // it carries stays valid.
 func copyExact(cmd *cobra.Command, src *repo.Repo, srcLoc string, srcCfg *repoconfig.Config,
-	dstBE backend.Backend, dstLoc string, dstExists bool, cf *copyFlags,
+	dstBE backend.Backend, dstLoc string, dstExists bool, sourceSigned bool, cf *copyFlags,
 ) error {
 	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
 	defer closeBackend(dstBE)
+
+	// An exact copy republishes the source's own Release, so the copy is signed
+	// exactly when the source was. Only a copy that would be unsigned and is
+	// not about to be re-signed has to account for that.
+	if !sourceSigned && !signingKeyGiven() {
+		if err := requireSigningIntent(errOut); err != nil {
+			return err
+		}
+	}
 
 	objs, listed, err := src.Objects(ctx(cmd))
 	if err != nil {
@@ -80,11 +89,12 @@ func copyExact(cmd *cobra.Command, src *repo.Repo, srcLoc string, srcCfg *repoco
 }
 
 // resignCopiedRelease replaces the copied Release signatures with ones made by
-// this operator's key, when --sign-release was given. The copied Release is
+// this operator's key, when one was given. The copied Release is
 // byte-identical to the source's, so the new signature is over the same
-// document the source signed.
+// document the source signed. With no key of our own the source's signature is
+// what the copy carries, which is the point of an exact copy.
 func resignCopiedRelease(cmd *cobra.Command, src *repo.Repo, dstBE backend.Backend) error {
-	if !gf.signRelease {
+	if !gf.signRelease || !signingKeyGiven() {
 		return nil
 	}
 	signer, err := releaseSigner()
@@ -160,11 +170,10 @@ func copyRebuilding(cmd *cobra.Command, run copyRun) error {
 	// Rebuilt indexes are a different document from the one the source signed,
 	// so a signed source may only be transformed if the copy gets a signature
 	// of its own.
-	keyGiven := gf.gpgKey != "" || gf.gpgKeyID != ""
-	signingCopy := gf.signRelease && keyGiven
+	signingCopy := gf.signRelease && signingKeyGiven()
 	if run.sourceSigned && !signingCopy {
 		return fmt.Errorf("this copy rebuilds the indexes (%s), which invalidates the signature the source carries; "+
-			"re-sign the copy with --sign-release and --gpg-key/--gpg-key-id, or copy the repository unchanged",
+			"re-sign the copy with --gpg-key or --gpg-key-id, or copy the repository unchanged",
 			strings.Join(transformReasons(run), ", "))
 	}
 

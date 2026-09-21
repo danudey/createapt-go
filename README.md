@@ -91,6 +91,29 @@ form it understands.
 (`debsigs` exists, but apt ignores it without a `debsig-verify` policy that
 almost nobody deploys. It is deliberately not implemented.)
 
+### Signing is the default
+
+Because the `Release` signature is the only thing that makes a repository
+trustworthy, `createapt-go` signs by default. Name a key with `--gpg-key` or
+`--gpg-key-id` and the `Release` is signed; there is no `--sign-release` to
+remember.
+
+A publishing command that names no key is **refused**, rather than quietly
+producing a repository apt will not accept:
+
+```
+$ createapt-go add /srv/repo dist/*.deb
+error: refusing to publish an unsigned repository: no signing key was given.
+Pass --gpg-key <file> or --gpg-key-id <id> to sign the Release, or
+--no-sign-release to publish without a signature
+```
+
+`--no-sign-release` publishes anyway and warns each time what that costs: every
+client has to mark the source `[trusted=yes]` (or run `apt-get update
+--allow-insecure-repositories`), and nobody can tell the packages came from you.
+The choice is recorded in `createapt-go.json`, so later updates to that
+repository do not need the flag again — they still print the warning.
+
 ## Backends
 
 The repository location's URL scheme selects the backend:
@@ -191,7 +214,9 @@ Useful flags (global unless noted):
 A package file that the updated indexes no longer reference is always removed on
 publish, so there is no flag to opt into blob cleanup.
 
---sign-release            GPG-sign the Release (writes InRelease and Release.gpg)
+--sign-release            GPG-sign the Release (writes InRelease and Release.gpg);
+                          on by default — name a key and it is used
+--no-sign-release         publish without signing the Release (warns on every publish)
 --verify-sigs             require a trusted signature on a repository being read
 --skip-verify             do not check the Release signature even when a key is available
 --keyring FILE            public keyring to verify against (repeatable)
@@ -205,14 +230,18 @@ publish, so there is no flag to opt into blob cleanup.
 ```sh
 # Publish two packages to an SSH host, signing the Release with a keyring key.
 createapt-go add sftp://build@mirror/srv/repo \
-    dist/*.deb --suite bookworm --sign-release --gpg-key-id releases@example.com
+    dist/*.deb --suite bookworm --gpg-key-id releases@example.com
 
 # Add to an S3 bucket (packages land in pool/main/ by default), signing the Release.
 createapt-go add s3://my-bucket/apt dist/*.deb \
-    --suite jammy --sign-release --gpg-key ./signing.key
+    --suite jammy --gpg-key ./signing.key
 
 # Add every package under a directory tree (subdirectories are scanned recursively).
-createapt-go add /srv/repo dist/
+createapt-go add /srv/repo dist/ --gpg-key-id releases@example.com
+
+# Publish a scratch repository with no signature at all (apt clients will need
+# [trusted=yes]).
+createapt-go add /srv/scratch dist/*.deb --no-sign-release
 
 # Add a source package alongside its binaries. The .dsc's tarballs are uploaded
 # with it, and are checked against the checksums the .dsc records first.
@@ -415,12 +444,12 @@ own:
 # and sign the rebuilt indexes with our own key.
 createapt-go copy /srv/upstream /srv/mirror \
     --latest-only --arch amd64 --exclude-kinds debug,source \
-    --sign-release --gpg-key-id releases@example.com
+    --gpg-key-id releases@example.com
 ```
 
-Without `--sign-release` and a key that copy is refused, because it would
-otherwise publish indexes alongside a signature that no longer matches them. An
-unsigned source has no such constraint.
+Without a key of its own that copy is refused, because it would otherwise
+publish indexes alongside a signature that no longer matches them. An unsigned
+source has no such constraint.
 
 ### Notes
 
@@ -496,7 +525,7 @@ createapt-go create /srv/repo \
     --repo-name "Frobulator Beta Bookworm" \
     --repo-url  "https://downloads.example.com/apt" \
     --origin Frobulator --label "Frobulator Beta" \
-    --sign-release --gpg-key-id releases@example.com
+    --gpg-key-id releases@example.com
 
 # Later updates re-sign automatically from the recorded config.
 createapt-go add /srv/repo dist/*.deb

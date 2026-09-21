@@ -12,6 +12,67 @@ import (
 	"testing"
 )
 
+// TestPublishingRefusesToBeUnsignedByAccident covers the default: a
+// publishing command with no signing flags at all is refused, saying up front
+// what to do about it, and the opt-out that unblocks it says what it costs.
+// Nothing is written either way until the question is settled.
+func TestPublishingRefusesToBeUnsignedByAccident(t *testing.T) {
+	dir := t.TempDir()
+	deb := pkgPath(t, "hello_2.10-3_all.deb")
+
+	out, err := tryCLIRaw(t, "add", dir, deb, "--suite", "bookworm")
+	if err == nil {
+		t.Fatal("an unsigned repository was published without the operator asking for one")
+	}
+	for _, want := range []string{"--gpg-key", "--no-sign-release"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the refusal does not mention %s:\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dists")); !os.IsNotExist(err) {
+		t.Errorf("the refused publish still wrote to %s", dir)
+	}
+
+	// The opt-out works, and is loud about what it means.
+	out = cli(t, "add", dir, deb, "--suite", "bookworm", "--no-sign-release")
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, "unsigned") {
+		t.Errorf("--no-sign-release did not warn about the consequences:\n%s", out)
+	}
+
+	// Once recorded, the opt-out carries the repository forward without being
+	// retyped — and says so, rather than going quiet.
+	out, err = tryCLIRaw(t, "add", dir, pkgPath(t, "libfoo_1.3.0-1_amd64.deb"), "--suite", "bookworm")
+	if err != nil {
+		t.Fatalf("the recorded opt-out did not carry forward: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "recorded as unsigned") {
+		t.Errorf("a later unsigned publish did not say where the decision came from:\n%s", out)
+	}
+}
+
+// TestSignedByDefaultNeedsOnlyAKey proves the other half of the default: a key
+// alone is enough, with no --sign-release to remember.
+func TestSignedByDefaultNeedsOnlyAKey(t *testing.T) {
+	key := newSigningKey(t)
+	dir := t.TempDir()
+	cli(t, "add", dir,
+		pkgPath(t, "hello_2.10-3_all.deb"),
+		pkgPath(t, "libfoo_1.3.0-1_amd64.deb"),
+		"--suite", "bookworm", "--gpg-key-id", key.UID)
+
+	for _, name := range []string{"InRelease", "Release.gpg"} {
+		if _, err := os.Stat(filepath.Join(dir, "dists", "bookworm", name)); err != nil {
+			t.Errorf("%s was not written: %v", name, err)
+		}
+	}
+
+	apt := newAptClient(t)
+	apt.Trust(key.Public)
+	apt.Source("file://"+dir, "bookworm", "main", "")
+	apt.Update()
+	apt.Download("hello")
+}
+
 // TestUnsignedRepositoryIsUsableByApt publishes to local disk and reads the
 // result back with a real apt, which is the baseline every other scenario
 // builds on.
@@ -257,7 +318,7 @@ func TestCopyTransformingRequiresItsOwnSignature(t *testing.T) {
 	if err == nil {
 		t.Fatal("a transforming copy of a signed repository was allowed without a new signature")
 	}
-	if !strings.Contains(out, "--sign-release") {
+	if !strings.Contains(out, "--gpg-key") {
 		t.Errorf("the refusal does not say how to proceed:\n%s", out)
 	}
 

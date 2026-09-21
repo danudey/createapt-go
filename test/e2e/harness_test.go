@@ -86,6 +86,13 @@ func cli(t *testing.T, args ...string) string {
 // the cases where a failure is the expected outcome.
 func tryCLI(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	return tryCLIRaw(t, withSigningIntent(args)...)
+}
+
+// tryCLIRaw is tryCLI with the arguments passed through exactly as given, for
+// the tests that are about what the CLI does with no signing flags at all.
+func tryCLIRaw(t *testing.T, args ...string) (string, error) {
+	t.Helper()
 	bin, err := binary()
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +105,31 @@ func tryCLI(t *testing.T, args ...string) (string, error) {
 	err = cmd.Run()
 	t.Logf("$ createapt-go %s\n%s", strings.Join(args, " "), buf.String())
 	return buf.String(), err
+}
+
+// publishingCommands are the subcommands that write a repository, and so have
+// to state whether what they publish is signed.
+var publishingCommands = map[string]bool{
+	"create": true, "add": true, "remove": true, "rebuild": true, "copy": true,
+}
+
+// withSigningIntent appends --no-sign-release to a publishing command that
+// names no signing key. Signing is the tool's default, so a test that is not
+// about signatures would otherwise be refused; the tests that do exercise
+// signing pass a key and are left alone. TestUnsignedPublishingIsRefused covers
+// the refusal itself.
+func withSigningIntent(args []string) []string {
+	if len(args) == 0 || !publishingCommands[args[0]] {
+		return args
+	}
+	for _, a := range args {
+		switch {
+		case a == "--no-sign-release", a == "--sign-release",
+			strings.HasPrefix(a, "--gpg-key"), strings.HasPrefix(a, "--no-sign-release="):
+			return args
+		}
+	}
+	return append(append([]string(nil), args...), "--no-sign-release")
 }
 
 // have reports whether a command is on the path.

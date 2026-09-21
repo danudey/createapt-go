@@ -41,6 +41,12 @@ func openRepoBackend(cmd *cobra.Command, be backend.Backend, create bool) (*repo
 		closeBackend(be)
 		return nil, nil, err
 	}
+	// Everything reaching here is about to publish an index, so this is the
+	// point at which an unsigned publish has to be accounted for.
+	if err := requireSigningIntent(cmd.ErrOrStderr()); err != nil {
+		closeBackend(be)
+		return nil, nil, err
+	}
 
 	opts, err := repoOptions(create)
 	if err != nil {
@@ -143,10 +149,18 @@ func applyConfigDefaults(cmd *cobra.Command, cfg *repoconfig.Config) error {
 		gf.description = cfg.Description
 	}
 
-	if !fl.Changed("sign-release") && cfg.SignRelease {
-		gf.signRelease = true
+	// Signing is on by default, so the recorded setting is consulted only to
+	// carry a deliberate opt-out forward: a repository deliberately published
+	// unsigned once stays publishable without retyping --no-sign-release, and
+	// still warns every time. Naming a key on the command line overrides that
+	// opt-out rather than silently ignoring the key.
+	keyOnCommandLine := fl.Changed("gpg-key") || fl.Changed("gpg-key-id")
+	signFlagGiven := fl.Changed("sign-release") || fl.Changed("no-sign-release")
+	if !signFlagGiven && !keyOnCommandLine && !cfg.SignRelease {
+		gf.signRelease = false
+		gf.unsignedByConfig = true
 	}
-	if !fl.Changed("gpg-key") && !fl.Changed("gpg-key-id") && cfg.GPGKeyID != "" {
+	if gf.signRelease && !keyOnCommandLine && cfg.GPGKeyID != "" {
 		gf.gpgKeyID = cfg.GPGKeyID
 	}
 	return nil

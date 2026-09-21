@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -94,9 +95,9 @@ func TestValidateSigningFlags(t *testing.T) {
 	}{
 		{name: "nothing set is fine"},
 		{
-			name:    "a key with nothing to sign is a mistake",
-			flags:   globalFlags{gpgKeyID: "releases@example.com"},
-			wantErr: "--sign-release",
+			name:    "a key handed to a run told not to sign is a mistake",
+			flags:   globalFlags{gpgKeyID: "releases@example.com", noSignRelease: true},
+			wantErr: "--no-sign-release",
 		},
 		{
 			name:  "a key with something to sign is fine",
@@ -133,6 +134,100 @@ func TestValidateSigningFlags(t *testing.T) {
 	}
 }
 
+// TestSigningIsOnByDefault pins the headline behaviour: a repository is signed
+// unless the operator says otherwise, and the two ways of ending up unsigned
+// are treated differently — an oversight is refused, a deliberate choice is
+// warned about.
+func TestSigningIsOnByDefault(t *testing.T) {
+	saved := gf
+	t.Cleanup(func() { gf = saved })
+
+	t.Run("the flag default signs", func(t *testing.T) {
+		gf = globalFlags{}
+		cmd := rootCmd()
+		if !gf.signRelease {
+			t.Error("--sign-release does not default to true")
+		}
+		if f := cmd.PersistentFlags().Lookup("no-sign-release"); f == nil {
+			t.Fatal("--no-sign-release is not registered")
+		}
+	})
+
+	t.Run("--no-sign-release turns signing off", func(t *testing.T) {
+		gf = globalFlags{signRelease: true, noSignRelease: true}
+		if err := resolveSignRelease(testCommand()); err != nil {
+			t.Fatal(err)
+		}
+		if gf.signRelease {
+			t.Error("--no-sign-release did not turn signing off")
+		}
+	})
+
+	t.Run("the two signing flags contradict each other", func(t *testing.T) {
+		gf = globalFlags{signRelease: true}
+		cmd := testCommand()
+		for _, name := range []string{"sign-release", "no-sign-release"} {
+			if err := cmd.Flags().Set(name, "true"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := resolveSignRelease(cmd); err == nil {
+			t.Error("--sign-release together with --no-sign-release was accepted")
+		}
+	})
+
+	t.Run("publishing with no key and no opt-out is refused", func(t *testing.T) {
+		gf = globalFlags{signRelease: true}
+		var errOut bytes.Buffer
+		err := requireSigningIntent(&errOut)
+		if err == nil {
+			t.Fatal("an unsigned publish was allowed without --no-sign-release")
+		}
+		// The refusal is only useful if it names both ways out of it.
+		for _, want := range []string{"--gpg-key", "--no-sign-release"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not mention %s: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("publishing with a key is allowed and silent", func(t *testing.T) {
+		gf = globalFlags{signRelease: true, gpgKeyID: "releases@example.com"}
+		var errOut bytes.Buffer
+		if err := requireSigningIntent(&errOut); err != nil {
+			t.Fatal(err)
+		}
+		if errOut.Len() != 0 {
+			t.Errorf("a signed publish warned about something: %s", errOut.String())
+		}
+	})
+
+	t.Run("--no-sign-release is allowed and warns clearly", func(t *testing.T) {
+		gf = globalFlags{noSignRelease: true}
+		var errOut bytes.Buffer
+		if err := requireSigningIntent(&errOut); err != nil {
+			t.Fatalf("--no-sign-release was refused: %v", err)
+		}
+		got := errOut.String()
+		for _, want := range []string{"warning:", "--no-sign-release", "apt refuses an unsigned repository"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the warning does not mention %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("a recorded opt-out warns and names the config", func(t *testing.T) {
+		gf = globalFlags{unsignedByConfig: true}
+		var errOut bytes.Buffer
+		if err := requireSigningIntent(&errOut); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(errOut.String(), repoconfig.Path) {
+			t.Errorf("the warning does not say where the decision came from:\n%s", errOut.String())
+		}
+	})
+}
+
 // TestApplyConfigDefaultsOnlyFillsUnsetFlags is the precedence rule the config
 // file depends on: what the operator typed always wins over what was recorded.
 func TestApplyConfigDefaultsOnlyFillsUnsetFlags(t *testing.T) {
@@ -146,7 +241,7 @@ func TestApplyConfigDefaultsOnlyFillsUnsetFlags(t *testing.T) {
 	}
 
 	t.Run("an unset flag takes the recorded value", func(t *testing.T) {
-		gf = globalFlags{compression: "gzip,xz", hashes: "md5,sha256"}
+		gf = globalFlags{compression: "gzip,xz", hashes: "md5,sha256", signRelease: true}
 		cmd := testCommand()
 		if err := applyConfigDefaults(cmd, cfg); err != nil {
 			t.Fatal(err)
@@ -167,8 +262,40 @@ func TestApplyConfigDefaultsOnlyFillsUnsetFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("a recorded opt-out keeps the repository unsigned", func(t *testing.T) {
+		gf = globalFlags{compression: "gzip,xz", hashes: "md5,sha256", signRelease: true}
+		unsigned := *cfg
+		unsigned.SignRelease = false
+		if err := applyConfigDefaults(testCommand(), &unsigned); err != nil {
+			t.Fatal(err)
+		}
+		if gf.signRelease || !gf.unsignedByConfig {
+			t.Errorf("the recorded opt-out was not carried forward: %+v", gf)
+		}
+		// Restoring the recorded key here would contradict the opt-out.
+		if gf.gpgKeyID != "" {
+			t.Errorf("an unsigned repository restored a signing key: %q", gf.gpgKeyID)
+		}
+	})
+
+	t.Run("a key on the command line overrides a recorded opt-out", func(t *testing.T) {
+		gf = globalFlags{compression: "gzip,xz", hashes: "md5,sha256", signRelease: true, gpgKeyID: "CLI"}
+		unsigned := *cfg
+		unsigned.SignRelease = false
+		cmd := testCommand()
+		if err := cmd.Flags().Set("gpg-key-id", "CLI"); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyConfigDefaults(cmd, &unsigned); err != nil {
+			t.Fatal(err)
+		}
+		if !gf.signRelease || gf.gpgKeyID != "CLI" {
+			t.Errorf("naming a key did not re-enable signing: %+v", gf)
+		}
+	})
+
 	t.Run("an explicit flag wins", func(t *testing.T) {
-		gf = globalFlags{suite: "trixie", compression: "gzip,xz", hashes: "md5,sha256"}
+		gf = globalFlags{suite: "trixie", compression: "gzip,xz", hashes: "md5,sha256", signRelease: true}
 		cmd := testCommand()
 		if err := cmd.Flags().Set("suite", "trixie"); err != nil {
 			t.Fatal(err)
@@ -201,10 +328,10 @@ func TestApplyConfigDefaultsOnlyFillsUnsetFlags(t *testing.T) {
 func testCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "test"}
 	f := cmd.Flags()
-	for _, name := range []string{"target", "suite", "component", "origin", "label", "codename", "release-version"} {
+	for _, name := range []string{"target", "suite", "component", "origin", "label", "codename", "release-version", "gpg-key", "gpg-key-id"} {
 		f.String(name, "", "")
 	}
-	for _, name := range []string{"pool-layout", "by-hash", "sign-release", "gpg-key", "gpg-key-id"} {
+	for _, name := range []string{"pool-layout", "by-hash", "sign-release", "no-sign-release"} {
 		f.Bool(name, false, "")
 	}
 	for _, name := range []string{"compression", "hashes"} {

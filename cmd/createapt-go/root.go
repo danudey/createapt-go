@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/danudey/createapt-go/pkg/aptdata"
 	"github.com/danudey/createapt-go/pkg/backend"
 	"github.com/danudey/createapt-go/pkg/repo"
+	"github.com/danudey/createapt-go/pkg/repoconfig"
 	"github.com/danudey/createapt-go/pkg/sign"
 )
 
@@ -57,14 +59,24 @@ type globalFlags struct {
 	// a connection failure.
 	insecureIgnoreHostKey bool
 
-	// signing / verification
-	signRelease bool
-	verifySigs  bool
-	skipVerify  bool
-	gpgKey      string
-	gpgKeyID    string
-	gpgPass     string
-	keyrings    []string
+	// signing / verification.
+	//
+	// signRelease is the effective decision and defaults to true: apt refuses a
+	// repository whose Release carries no signature, so publishing one is an
+	// opt-out, spelled --no-sign-release.
+	signRelease   bool
+	noSignRelease bool
+	verifySigs    bool
+	skipVerify    bool
+	gpgKey        string
+	gpgKeyID      string
+	gpgPass       string
+	keyrings      []string
+
+	// unsignedByConfig records that signing was turned off by the repository's
+	// own recorded config rather than by --no-sign-release on this command line,
+	// so the warning can name the real source of the decision.
+	unsignedByConfig bool
 }
 
 // compatProfile is the set of defaults a --target selects.
@@ -159,7 +171,8 @@ packages are never downloaded.`,
 	pf.StringVar(&gf.codename, "codename", "", "Codename field recorded in the Release file")
 	pf.StringVar(&gf.releaseVersion, "release-version", "", "Version field recorded in the Release file")
 
-	pf.BoolVar(&gf.signRelease, "sign-release", false, "GPG-sign the Release file (writes InRelease and Release.gpg)")
+	pf.BoolVar(&gf.signRelease, "sign-release", true, "GPG-sign the Release file (writes InRelease and Release.gpg)")
+	pf.BoolVar(&gf.noSignRelease, "no-sign-release", false, "publish without signing the Release; apt refuses such a repository unless every client explicitly trusts it")
 	pf.BoolVar(&gf.verifySigs, "verify-sigs", false, "require a trusted signature on a repository being read; a missing key is an error rather than a warning")
 	pf.BoolVar(&gf.skipVerify, "skip-verify", false, "do not check the Release signature even when a key is available")
 	pf.StringVar(&gf.gpgKey, "gpg-key", "", "path to a GPG private key file (for signing)")
@@ -175,6 +188,9 @@ packages are never downloaded.`,
 // and validates that signing-related flags are coherent.
 func preRunE(cmd *cobra.Command, args []string) error {
 	if err := applyProfile(cmd, args); err != nil {
+		return err
+	}
+	if err := resolveSignRelease(cmd); err != nil {
 		return err
 	}
 	applyAWSEnv()
@@ -197,13 +213,31 @@ func applyAWSEnv() {
 	}
 }
 
-// validateSigningFlags rejects ambiguous signing intent. A signing key with no
-// instruction about what to sign is almost always a mistake (the key would
-// otherwise be silently ignored), so we require the user to be explicit.
+// resolveSignRelease collapses --sign-release and --no-sign-release into the
+// single signRelease decision the rest of the command reads. Signing is the
+// default because an apt client refuses a repository whose Release is not
+// signed, so an unsigned repository is something to ask for, not something to
+// end up with.
+func resolveSignRelease(cmd *cobra.Command) error {
+	fl := cmd.Flags()
+	if fl.Changed("sign-release") && fl.Changed("no-sign-release") {
+		return fmt.Errorf("--sign-release and --no-sign-release contradict each other")
+	}
+	if gf.noSignRelease {
+		gf.signRelease = false
+	}
+	// --sign-release=false is the same request spelled the other way round;
+	// normalise it so everything downstream sees one opt-out.
+	gf.noSignRelease = !gf.signRelease
+	return nil
+}
+
+// validateSigningFlags rejects ambiguous signing intent. A signing key handed
+// to a run that has been told not to sign is almost always a mistake (the key
+// would otherwise be silently ignored), so we require the user to be explicit.
 func validateSigningFlags() error {
-	keyGiven := gf.gpgKey != "" || gf.gpgKeyID != ""
-	if keyGiven && !gf.signRelease {
-		return fmt.Errorf("a signing key was provided (--gpg-key/--gpg-key-id) but --sign-release was not given; pass it to sign the repository")
+	if gf.noSignRelease && signingKeyGiven() {
+		return fmt.Errorf("a signing key was provided (--gpg-key/--gpg-key-id) but --no-sign-release says not to sign; drop one of them")
 	}
 	if gf.gpgKey != "" && gf.gpgKeyID != "" {
 		return fmt.Errorf("specify only one of --gpg-key or --gpg-key-id")
@@ -212,6 +246,41 @@ func validateSigningFlags() error {
 		return fmt.Errorf("--verify-sigs and --skip-verify contradict each other")
 	}
 	return nil
+}
+
+// signingKeyGiven reports whether a key to sign with is available, from either
+// the command line or a repository's recorded config.
+func signingKeyGiven() bool {
+	return gf.gpgKey != "" || gf.gpgKeyID != ""
+}
+
+// requireSigningIntent is the gate every publishing command passes through. An
+// unsigned apt repository is refused by a default-configured apt, so the two
+// ways of reaching one are separated: not naming a key is treated as an
+// oversight and refused, while asking for it outright is allowed and warned
+// about on every publish.
+func requireSigningIntent(errOut io.Writer) error {
+	if gf.signRelease {
+		if !signingKeyGiven() {
+			return fmt.Errorf("refusing to publish an unsigned repository: no signing key was given. " +
+				"Pass --gpg-key <file> or --gpg-key-id <id> to sign the Release, " +
+				"or --no-sign-release to publish without a signature")
+		}
+		return nil
+	}
+	warnUnsignedPublish(errOut)
+	return nil
+}
+
+// warnUnsignedPublish spells out what an unsigned repository costs its users,
+// naming whichever decision turned signing off.
+func warnUnsignedPublish(errOut io.Writer) {
+	why := "--no-sign-release: the Release will not be signed"
+	if gf.unsignedByConfig {
+		why = fmt.Sprintf("this repository is recorded as unsigned in %s, so the Release will not be signed", repoconfig.Path)
+	}
+	fmt.Fprintf(errOut, "warning: %s.\n", why)
+	fmt.Fprintf(errOut, "warning: apt refuses an unsigned repository: every client has to mark the source [trusted=yes] or run with --allow-insecure-repositories, and nobody can tell that what they downloaded came from you. Sign it with --gpg-key or --gpg-key-id.\n")
 }
 
 // applyProfile resolves --target into defaults for index compression and the
@@ -304,7 +373,7 @@ func releaseSigner() (repo.Signer, error) {
 	case gf.gpgKeyID != "":
 		return sign.NewKeyIDSigner(gf.gpgKeyID, gf.gpgPass), nil
 	default:
-		return nil, fmt.Errorf("--sign-release requires --gpg-key or --gpg-key-id")
+		return nil, fmt.Errorf("signing the Release requires --gpg-key or --gpg-key-id (or --no-sign-release to publish unsigned)")
 	}
 }
 
